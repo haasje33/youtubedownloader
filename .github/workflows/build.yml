@@ -1,7 +1,7 @@
 name: Build apps
 
 # Pushes and pull requests only run the tests. The apps are built for release tags
-# (vX.Y.Z), which also publish to haasje33/youtubedownloader-releases, and when
+# (vX.Y.Z), which also attach them to the GitHub release of that tag, and when
 # started by hand under Actions → "Build apps" → "Run workflow".
 on:
   push:
@@ -17,9 +17,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  RELEASES_REPO: haasje33/youtubedownloader-releases
 
 jobs:
   test:
@@ -134,17 +131,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check the releases token
-        env:
-          TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::The RELEASES_TOKEN secret is missing (see issue #1)."
-            exit 1
-          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -160,27 +150,11 @@ jobs:
           python scripts/release_notes.py "${GITHUB_REF_NAME#v}" > notes.md
           cat notes.md
 
-      - name: Make sure the releases repository has a first commit
-        env:
-          TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        run: |
-          remote="https://x-access-token:${TOKEN}@github.com/${RELEASES_REPO}.git"
-          if git ls-remote --exit-code "$remote" >/dev/null 2>&1; then
-            echo "Releases repository already initialised."
-          else
-            mkdir init && cd init && git init -q -b main
-            printf '# YouTube Downloader releases\n\nDownloads for YouTube Downloader (macOS on Apple Silicon and Windows).\nThe app updates itself from the releases here.\n' > README.md
-            git add README.md
-            git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
-              commit -q -m "Initial commit"
-            git push -q "$remote" main
-          fi
-
+      # Creates the release, or fills in the one made on GitHub for this tag.
       - uses: softprops/action-gh-release@v2
         with:
-          repository: ${{ env.RELEASES_REPO }}
-          token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: YouTube Downloader ${{ github.ref_name }}
           body_path: notes.md
           files: artifacts/*
+          make_latest: true

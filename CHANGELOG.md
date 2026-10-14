@@ -8,7 +8,7 @@
 - **The download engine (yt-dlp) updates itself** once a day, so downloads keep working
   when YouTube changes something. If a download fails, the app looks for a newer
   yt-dlp right away and offers to restart with it.
-- Releases are now published at github.com/haasje33/youtubedownloader-releases.
+- Releases, with SHA-256 checksums, are published at github.com/haasje33/youtubedownloader/releases.
 - macOS: only Apple Silicon Macs are supported from this version on.
 - Windows: the size estimate now says "converted to H.264" instead of HEVC.
 

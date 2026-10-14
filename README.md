@@ -67,7 +67,7 @@ Requirements and fallbacks:
 
 ### Installing on Windows
 
-1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [releases page](https://github.com/haasje33/youtubedownloader-releases/releases).
+1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [releases page](https://github.com/haasje33/youtubedownloader/releases).
 2. Run it. The app is not code-signed, so Windows SmartScreen will say *"Windows protected your PC"*. Click **More info → Run anyway**.
 3. Start **YouTube Downloader** from the Start menu.
 
@@ -77,7 +77,7 @@ To build it yourself on Windows (Python 3.11+ from python.org), run `python scri
 
 ## Installing on macOS
 
-1. Download `YouTube-Downloader-<version>-macOS-arm64.dmg` from the [releases page](https://github.com/haasje33/youtubedownloader-releases/releases). It runs on Macs with Apple Silicon (M1 and newer); Intel Macs are no longer supported from v0.5.0.
+1. Download `YouTube-Downloader-<version>-macOS-arm64.dmg` from the [releases page](https://github.com/haasje33/youtubedownloader/releases). It runs on Macs with Apple Silicon (M1 and newer); Intel Macs are no longer supported from v0.5.0.
 2. Open the `.dmg` and drag **YouTube Downloader** into **Applications**.
 3. The app is not notarized by Apple, so the first time you open it macOS says it "could not verify that YouTube Downloader is free of malware". To allow it:
    - Try to open the app once and click **Done** in the warning.
@@ -128,7 +128,7 @@ To release:
 2. Set `__version__` in `src/ytdownloader/__init__.py`.
 3. Push a tag `vX.Y.Z`.
 
-The workflow publishes the files and `SHA256SUMS.txt` to `haasje33/youtubedownloader-releases`, where the in-app updater finds them. This needs the `RELEASES_TOKEN` secret: a fine-grained token with *Contents: read and write* on that repository.
+The workflow attaches the files and `SHA256SUMS.txt` to the release of that tag in this repository, where the in-app updater finds them. You can also create the release on GitHub first (Releases → Draft a new release → new tag, target `main`). The workflow then fills in the files and the notes from `CHANGELOG.md`.
 
 To build on a Mac you need Python 3.11+ with Tk (the python.org installer includes Tk):
 

@@ -1,7 +1,7 @@
 """In-app updates from the public releases repository.
 
-Releases live in https://github.com/haasje33/youtubedownloader-releases (the code
-repository is private). Each release has:
+Releases live in https://github.com/haasje33/youtubedownloader/releases.
+Each release has:
     YouTube-Downloader-<ver>-Windows-x64-Setup.exe   (Windows installer)
     YouTube-Downloader-<ver>-macOS-arm64.zip         (the .app, for the updater)
     YouTube-Downloader-<ver>-macOS-arm64.dmg         (for manual installs)
@@ -32,7 +32,7 @@ from . import APP_NAME, __version__
 
 log = logging.getLogger(__name__)
 
-RELEASES_REPO = "haasje33/youtubedownloader-releases"
+RELEASES_REPO = "haasje33/youtubedownloader"
 LATEST_URL = f"https://api.github.com/repos/{RELEASES_REPO}/releases/latest"
 USER_AGENT = f"YouTubeDownloader/{__version__}"
 CHECKSUMS_NAME = "SHA256SUMS.txt"
@@ -137,7 +137,12 @@ def check(current: str = __version__, url: str = LATEST_URL) -> Release | None:
         return None
     if not is_newer(data.get("tag_name", "0"), current):
         return None
-    return release_from_api(data, suffix)
+    try:
+        return release_from_api(data, suffix)
+    except UpdateError as exc:
+        # Published, but the build hasn't attached its files yet (or none for this computer).
+        log.info("Release %s not installable yet: %s", data.get("tag_name"), exc)
+        return None
 
 
 def download(release: Release, on_progress: Callable[[int, int], None] | None = None,

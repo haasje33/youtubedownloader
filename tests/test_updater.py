@@ -103,14 +103,16 @@ def test_prerelease_is_ignored(release_server, monkeypatch):
     assert updater.check(current="0.5.0", url=f"{base}/latest.json") is None
 
 
-def test_release_without_checksums_is_refused(release_server, monkeypatch):
+def test_release_without_checksums_is_not_offered(release_server, monkeypatch):
+    # Right after "Publish release" the build hasn't attached its files yet.
     base, _, _, root = release_server
     data = json.loads((root / "latest.json").read_text())
     data["assets"] = [a for a in data["assets"] if a["name"] != "SHA256SUMS.txt"]
     (root / "latest.json").write_text(json.dumps(data))
     monkeypatch.setattr(updater, "platform_asset_suffix", lambda *a: "-Windows-x64-Setup.exe")
+    assert updater.check(current="0.5.0", url=f"{base}/latest.json") is None
     with pytest.raises(updater.UpdateError, match="SHA256SUMS"):
-        updater.check(current="0.5.0", url=f"{base}/latest.json")
+        updater.release_from_api(data, "-Windows-x64-Setup.exe", fetch=lambda url: b"")
 
 
 def test_plain_notes():
