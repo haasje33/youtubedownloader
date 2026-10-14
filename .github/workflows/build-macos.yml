@@ -1,0 +1,80 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly rebuild so the app ships with the newest yt-dlp (YouTube changes often).
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest -v
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15        # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel  # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build app and disk image
+        run: scripts/build_macos.sh
+
+      - name: Check the window opens
+        run: YTD_SMOKE_TEST=1 "dist/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
+
+      - name: Try a real download (best effort, CI IPs are often blocked by YouTube)
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          "dist/YouTube Downloader.app/Contents/MacOS/YouTube Downloader" \
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw" -q 360 -o "$RUNNER_TEMP/downloads" -v
+          ls -la "$RUNNER_TEMP/downloads"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Downloader-macOS-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.dmg
+          generate_release_notes: true

@@ -1,0 +1,2 @@
+# Always build with the newest yt-dlp: YouTube changes often and old versions stop working.
+yt-dlp[default]>=2026.8.19

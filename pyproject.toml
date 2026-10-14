@@ -1,0 +1,23 @@
+[project]
+name = "ytdownloader"
+dynamic = ["version"]
+description = "Download YouTube videos as MP4 in qualities up to 4K (macOS app)"
+requires-python = ">=3.10"
+dependencies = ["yt-dlp[default]>=2026.8.19"]
+
+[project.scripts]
+youtube-downloader = "ytdownloader.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "ytdownloader.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
