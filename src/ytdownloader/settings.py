@@ -41,6 +41,8 @@ class Settings:
     mode: str = "compatible"
     cookies_from_browser: str = ""
     upscale_content: str = "realistic"
+    last_update_check: float = 0.0
+    skipped_version: str = ""
 
     @classmethod
     def load(cls) -> "Settings":

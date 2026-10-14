@@ -24,6 +24,9 @@ OutputBaseFilename=YouTube-Downloader-{#AppVersion}-Windows-x64-Setup
 SetupIconFile=..\..\build\icon\AppIcon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 WizardStyle=modern
+; In-app updates run this installer with /SILENT /CLOSEAPPLICATIONS /RELAUNCH=1.
+CloseApplications=yes
+RestartApplications=no
 ; The CUDA libraries are big; fast LZMA keeps build times reasonable.
 Compression=lzma2/fast
 SolidCompression=no
@@ -41,3 +44,11 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; Restart the app after an in-app update (as the normal user, not as administrator).
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch
+
+[Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;

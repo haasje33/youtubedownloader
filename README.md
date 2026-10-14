@@ -1,6 +1,6 @@
 # YouTube Downloader for macOS and Windows
 
-A small app for Mac and Windows that downloads YouTube videos as **MP4** in any quality YouTube offers, from 144p up to **4K (2160p)**, or as **MP3** audio. It can also **upscale low-resolution videos with AI**.
+A small app for Macs with Apple Silicon and for Windows PCs that downloads YouTube videos as **MP4** in any quality YouTube offers, from 144p up to **4K (2160p)**, or as **MP3** audio. It can also **upscale low-resolution videos with AI**.
 
 - Paste a link, click **Get Video Info**, pick a quality, click **Download**.
 - The highest available quality is selected by default. Only the qualities that exist for that video are listed, with the estimated download size.
@@ -67,7 +67,7 @@ Requirements and fallbacks:
 
 ### Installing on Windows
 
-1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [Releases](../../releases) page, or from the latest run under the **Actions** tab (artifact *YouTube-Downloader-Windows-x64*).
+1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [releases page](https://github.com/haasje33/youtubedownloader-releases/releases).
 2. Run it. The app is not code-signed, so Windows SmartScreen will say *"Windows protected your PC"*. Click **More info → Run anyway**.
 3. Start **YouTube Downloader** from the Start menu.
 
@@ -77,9 +77,7 @@ To build it yourself on Windows (Python 3.11+ from python.org), run `python scri
 
 ## Installing on macOS
 
-1. Download the `.dmg` for your Mac from the [Releases](../../releases) page, or from the latest run under the repository's **Actions** tab (artifact *YouTube-Downloader-macOS-…*):
-   - `arm64`: Apple Silicon (M1, M2, M3, M4, …)
-   - `x86_64`: Intel Macs
+1. Download `YouTube-Downloader-<version>-macOS-arm64.dmg` from the [releases page](https://github.com/haasje33/youtubedownloader-releases/releases). It runs on Macs with Apple Silicon (M1 and newer); Intel Macs are no longer supported from v0.5.0.
 2. Open the `.dmg` and drag **YouTube Downloader** into **Applications**.
 3. The app is not notarized by Apple, so the first time you open it macOS says it "could not verify that YouTube Downloader is free of malware". To allow it:
    - Try to open the app once and click **Done** in the warning.
@@ -91,6 +89,17 @@ To build it yourself on Windows (Python 3.11+ from python.org), run `python scri
    On macOS 15 (Sequoia) and later, right-click → Open no longer skips this warning.
 
 It needs macOS 11 (Big Sur) or later.
+
+## Updates
+
+The app checks for a new version at startup (once a day) and under **Check for Updates…**
+(in the app menu on a Mac, under **Help** on Windows).
+- You see what's new and can choose **Update Now**, **Later** or **Skip This Version**.
+- The update is downloaded, its SHA-256 checksum is verified, and the app restarts with the new version.
+- On Windows, you confirm the administrator prompt.
+- An update never interrupts a running download or upscale. It waits until that job is done.
+
+The download engine, yt-dlp, updates itself separately, once a day, from PyPI. Each new version is checked in a separate process before it is used, from the next start on. If a download fails, the app looks for a newer yt-dlp right away and offers to restart with it. If a downloaded yt-dlp ever doesn't work, the app falls back to the version it shipped with.
 
 ## Command line
 
@@ -106,11 +115,20 @@ APP="/Applications/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
 "$APP" --upscale-file old-video.mp4 --upscale-to 1080 --content fast     # upscale a local file
                                                    # (--content realistic | fast | animation)
 "$APP" --self-test                                                # check the bundled tools
+"$APP" --check-update                                             # is there a newer app version?
+"$APP" --update-ytdlp                                             # fetch the newest yt-dlp now
 ```
 
 ## Building it yourself
 
-GitHub Actions builds the app on every push (`.github/workflows/build-macos.yml`). Pushing a tag like `v0.2.0` publishes a release with both `.dmg` files. The workflow also rebuilds once a week, so the app keeps getting the newest yt-dlp.
+`.github/workflows/build.yml` runs the tests on every push. The apps (Apple Silicon `.dmg` plus update `.zip`, and the Windows installer) are built when you push a version tag, or when you start the workflow by hand (Actions → Build apps → Run workflow, optionally with the upscaler benchmark).
+
+To release:
+1. Add a section for the version to `CHANGELOG.md`; it becomes the release notes.
+2. Set `__version__` in `src/ytdownloader/__init__.py`.
+3. Push a tag `vX.Y.Z`.
+
+The workflow publishes the files and `SHA256SUMS.txt` to `haasje33/youtubedownloader-releases`, where the in-app updater finds them. This needs the `RELEASES_TOKEN` secret: a fine-grained token with *Contents: read and write* on that repository.
 
 To build on a Mac you need Python 3.11+ with Tk (the python.org installer includes Tk):
 
@@ -135,9 +153,9 @@ python3 -m pytest                                # tests (need ffmpeg)
 ## Troubleshooting
 
 - **"Sign in to confirm you're not a bot"** or age-restricted videos: choose your browser under *Use cookies from* and make sure you're logged in to YouTube in that browser. Safari cookies only work if the app has Full Disk Access (System Settings → Privacy & Security).
-- **Downloads suddenly fail for every video**: YouTube changed something. Get a newer build (the weekly CI build includes the latest yt-dlp).
-- **AI upscale fails** with a Vulkan/GPU error: the Mac's graphics chip isn't supported by Real-ESRGAN. This can happen on old Intel Macs.
-- **Logs** are in `~/Library/Logs/YouTube Downloader/youtube-downloader.log`.
+- **Downloads suddenly fail for every video**: YouTube changed something. The app updates yt-dlp by itself; to force it, run `--update-ytdlp` and restart the app.
+- **AI upscale fails** with a Vulkan/GPU error: the graphics card isn't supported by Real-ESRGAN.
+- **Logs** are in `~/Library/Logs/YouTube Downloader/youtube-downloader.log` (Mac) and `%LOCALAPPDATA%\YouTube Downloader\Logs\youtube-downloader.log` (Windows).
 
 ## Project layout
 
@@ -150,6 +168,8 @@ src/ytdownloader/
   tools.py       finds the bundled ffmpeg / ffprobe / deno / realesrgan
   gui.py         Tk user interface
   cli.py         command-line interface and --self-test
+  updater.py     in-app updates from the releases repository
+  ytdlp_update.py  keeps yt-dlp current between app updates
 packaging/       PyInstaller specs (macOS, windows/), Inno Setup script, entry script
 scripts/         build_macos.sh, fetch_tools.sh, build_windows.py, make_icon.py,
                  convert_srvgg_to_ncnn.py (Fast model for Real-ESRGAN/ncnn),

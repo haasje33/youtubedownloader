@@ -1,17 +1,25 @@
 name: Build apps
 
+# Pushes and pull requests only run the tests. The apps are built for release tags
+# (vX.Y.Z), which also publish to haasje33/youtubedownloader-releases, and when
+# started by hand under Actions → "Build apps" → "Run workflow".
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-  schedule:
-    # Weekly rebuild so the app ships with the newest yt-dlp (YouTube changes often).
-    - cron: "17 4 * * 1"
+    inputs:
+      benchmark:
+        description: "Also benchmark the AI upscaler settings on the Mac"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  RELEASES_REPO: haasje33/youtubedownloader-releases
 
 jobs:
   test:
@@ -28,40 +36,23 @@ jobs:
       - name: Run tests
         run: python -m pytest -v
 
-  build:
+  build-macos:
     needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15        # Apple Silicon
-            arch: arm64
-          - runner: macos-15-intel  # Intel
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15  # Apple Silicon
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Build app and disk image
+      - name: Build app, disk image and update zip
         run: scripts/build_macos.sh
 
       - name: Check the window opens
         run: YTD_SMOKE_TEST=1 "dist/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
 
-      - name: Try a real download (best effort, CI IPs are often blocked by YouTube)
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          "dist/YouTube Downloader.app/Contents/MacOS/YouTube Downloader" \
-            "https://www.youtube.com/watch?v=jNQXAC9IVRw" -q 360 -o "$RUNNER_TEMP/downloads" -v
-          ls -la "$RUNNER_TEMP/downloads"
-
-      - name: Try AI upscaling (best effort, CI machines may have no usable GPU)
-        continue-on-error: true
-        timeout-minutes: 15
+      - name: Upscale with all three models
         run: |
           APP="dist/YouTube Downloader.app/Contents"
           "$APP/Frameworks/bin/ffmpeg" -loglevel error -y -f lavfi -i testsrc2=size=160x90:rate=10:duration=1 \
@@ -72,20 +63,22 @@ jobs:
           done
           ls -la "$RUNNER_TEMP/upscaled"
 
-      - name: Benchmark AI upscaler settings (informational)
-        if: matrix.arch == 'arm64'  # Intel runners have no usable GPU; it would only take long
-        continue-on-error: true
-        timeout-minutes: 30
+      - name: Benchmark AI upscaler settings
+        if: github.event_name == 'workflow_dispatch' && inputs.benchmark
         run: python scripts/bench_upscale.py "dist/YouTube Downloader.app"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: YouTube-Downloader-macOS-${{ matrix.arch }}
-          path: dist/*.dmg
+          name: YouTube-Downloader-macOS-arm64
+          path: |
+            dist/*.dmg
+            dist/*-macOS-arm64.zip
           if-no-files-found: error
+          retention-days: 14
 
   build-windows:
     needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     defaults:
       run:
@@ -121,36 +114,73 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ONNX upscale failed" }
           Get-ChildItem "$env:RUNNER_TEMP\up"
 
-      - name: Try the Vulkan engine (best effort, no GPU on CI)
-        continue-on-error: true
+      - name: Install silently and relaunch, as the in-app updater does
         run: |
-          $env:YTD_UPSCALE_ENGINE = "ncnn"
-          & "dist\YouTube Downloader\youtube-downloader-cli.exe" --upscale-file "$env:RUNNER_TEMP\tiny.mp4" `
-            --upscale-to 1080 --content fast -o "$env:RUNNER_TEMP\up" -v
+          $setup = Get-ChildItem dist\*Setup.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
+          & "${env:ProgramFiles}\YouTube Downloader\youtube-downloader-cli.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Installed app failed its self-test" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: YouTube-Downloader-Windows-x64
-          path: |
-            dist/*Setup.exe
-            dist/*Windows-x64.zip
+          path: dist/*Setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-  release:
+  publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, build-windows]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the releases token
+        env:
+          TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::The RELEASES_TOKEN secret is missing (see issue #1)."
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Checksums and release notes
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd ..
+          python scripts/release_notes.py "${GITHUB_REF_NAME#v}" > notes.md
+          cat notes.md
+
+      - name: Make sure the releases repository has a first commit
+        env:
+          TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          remote="https://x-access-token:${TOKEN}@github.com/${RELEASES_REPO}.git"
+          if git ls-remote --exit-code "$remote" >/dev/null 2>&1; then
+            echo "Releases repository already initialised."
+          else
+            mkdir init && cd init && git init -q -b main
+            printf '# YouTube Downloader releases\n\nDownloads for YouTube Downloader (macOS on Apple Silicon and Windows).\nThe app updates itself from the releases here.\n' > README.md
+            git add README.md
+            git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
+              commit -q -m "Initial commit"
+            git push -q "$remote" main
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/*.dmg
-            artifacts/*Setup.exe
-            artifacts/*Windows-x64.zip
-          generate_release_notes: true
+          repository: ${{ env.RELEASES_REPO }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: YouTube Downloader ${{ github.ref_name }}
+          body_path: notes.md
+          files: artifacts/*

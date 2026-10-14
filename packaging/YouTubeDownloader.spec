@@ -3,7 +3,7 @@
 import os
 import re
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 APP_NAME = "YouTube Downloader"
@@ -28,7 +28,7 @@ a = Analysis(
     [os.path.join(ROOT, "packaging", "app_main.py")],
     pathex=[os.path.join(ROOT, "src")],
     binaries=binaries,
-    datas=collect_data_files("yt_dlp_ejs") + [(models, "realesrgan-models")],
+    datas=collect_data_files("yt_dlp_ejs") + copy_metadata("yt-dlp") + [(models, "realesrgan-models")],
     hiddenimports=["yt_dlp_ejs"],
     excludes=["pytest", "PIL"],
     noarchive=False,

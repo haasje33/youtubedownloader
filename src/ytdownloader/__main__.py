@@ -16,15 +16,22 @@ def main() -> int:
     # Finder may pass a "-psn_..." process serial number; ignore it.
     args = [a for a in sys.argv[1:] if not a.startswith("-psn_")]
 
+    if args[:1] == ["--validate-ytdlp"] and len(args) == 3:
+        from .ytdlp_update import run_validation
+
+        return run_validation(args[1], args[2])
+
     from .settings import setup_logging
+    from .ytdlp_update import activate
+
+    setup_logging(verbose="-v" in args or "--verbose" in args)
+    activate()  # use a newer downloaded yt-dlp; must run before anything imports yt_dlp
 
     if args:
-        setup_logging(verbose="-v" in args or "--verbose" in args)
         from .cli import main as cli_main
 
         return cli_main(args)
 
-    setup_logging()
     from .gui import run
 
     run()

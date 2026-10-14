@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="AI-upscale a local video file instead of downloading (needs --upscale-to)")
     parser.add_argument("-l", "--list", action="store_true", help="only list available qualities")
     parser.add_argument("--self-test", action="store_true", help="check bundled tools and exit")
+    parser.add_argument("--check-update", action="store_true", help="check for a new app version")
+    parser.add_argument("--update-ytdlp", action="store_true",
+                        help="download the newest yt-dlp now (used from the next start)")
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging to stderr")
     return parser
 
@@ -42,8 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
 def self_test() -> int:
     import yt_dlp
 
+    from . import ytdlp_update
+
     print(f"{APP_NAME} {__version__}")
-    print(f"yt-dlp {yt_dlp.version.__version__}")
+    print(f"yt-dlp {yt_dlp.version.__version__} ({yt_dlp.__file__})")
+    print(f"    bundled: {ytdlp_update.bundled_version()}")
     ok = True
     try:
         import yt_dlp_ejs  # noqa: F401
@@ -116,6 +122,28 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.check_update:
+        from . import updater
+
+        print(f"{APP_NAME} {__version__}")
+        try:
+            release = updater.check()
+        except updater.UpdateError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Update available: {release.version} ({release.asset_name})" if release else "Up to date.")
+        return 0
+    if args.update_ytdlp:
+        from . import ytdlp_update
+
+        try:
+            version = ytdlp_update.update(force=True)
+        except ytdlp_update.YtdlpUpdateError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Installed yt-dlp {version}; used from the next start." if version
+              else f"yt-dlp is up to date ({ytdlp_update.active_version()}).")
+        return 0
 
     last = {"line": ""}
 

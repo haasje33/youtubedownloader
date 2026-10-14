@@ -2,7 +2,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 APP_NAME = "YouTube Downloader"
@@ -13,7 +13,7 @@ binaries = []
 for name in os.listdir(os.path.join(VENDOR, "bin")):
     binaries.append((os.path.join(VENDOR, "bin", name), "bin"))
 
-datas = collect_data_files("yt_dlp_ejs")
+datas = collect_data_files("yt_dlp_ejs") + copy_metadata("yt-dlp")  # version, for ytdlp_update
 datas += [
     (os.path.join(VENDOR, "realesrgan-models"), "realesrgan-models"),
     (os.path.join(VENDOR, "onnx-models"), "onnx-models"),

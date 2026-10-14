@@ -9,11 +9,12 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
-from . import APP_NAME, __version__, downloader, formats, tools, upscale
+from . import APP_NAME, __version__, downloader, formats, tools, updater, upscale, ytdlp_update
 from .downloader import Cancelled, DownloadFailed, Progress, VideoInfo, format_bytes, format_duration
 from .formats import Mode, tier_label
 from .settings import Settings
@@ -91,7 +92,12 @@ class App:
             threading.Thread(target=lambda: self.events.put(("engine", upscale.engine_description())),
                              daemon=True).start()
         self._warn_missing_tools()
+        self.pending_update: updater.Release | None = None
+        self.update_window: UpdateProgress | None = None
+        self.ytdlp_retry_offered = False
+        self._build_menu()
         root.after(100, self._poll_events)
+        root.after(2500, self._startup_checks)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # --- layout -------------------------------------------------------------
@@ -523,7 +529,7 @@ class App:
         if target and source_tier < target:
             parts.append(f"then AI-upscaled to {target}p (slow)")
         elif self._mode() is Mode.COMPATIBLE and selection.needs_conversion:
-            parts.append("will be converted to HEVC")
+            parts.append(f"will be converted to {formats.target_codec_label()}")
         if target and source_tier >= target:
             parts.append(f"already ≥ {target}p, so no upscaling")
         self.estimate_var.set(" · ".join(parts))
@@ -532,6 +538,7 @@ class App:
         self._set_state("idle")
         self.status_var.set("Could not get video info.")
         messagebox.showerror(APP_NAME, message)
+        self._update_ytdlp_after_error()
 
     def _on_progress(self, p: Progress) -> None:
         if self.state != "downloading":
@@ -555,12 +562,14 @@ class App:
         self.progress.configure(value=1000)
         self.status_var.set(f"Saved “{path.name}”")
         self.root.bell()
+        self._install_pending_update()
 
     def _on_cancelled(self, _payload) -> None:
         self._keep_awake(False)
         self._set_state(self._resting_state())
         self.progress.configure(value=0)
         self.status_var.set("Cancelled.")
+        self._install_pending_update()
 
     def _on_download_error(self, message: str) -> None:
         self._keep_awake(False)
@@ -568,6 +577,227 @@ class App:
         self.progress.configure(value=0)
         self.status_var.set("Failed.")
         messagebox.showerror(APP_NAME, message)
+        if not any(word in message for word in ("upscal", "Encoding", "Converting", "ffmpeg")):
+            self._update_ytdlp_after_error()
+        self._install_pending_update()
+
+    # --- updates ------------------------------------------------------------
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self.root)
+        if IS_MAC:
+            app_menu = tk.Menu(menubar, name="apple")  # the application menu, after "About"
+            app_menu.add_command(label="Check for Updates…", command=lambda: self.check_for_updates(True))
+            menubar.add_cascade(menu=app_menu)
+        else:
+            help_menu = tk.Menu(menubar, tearoff=0)
+            help_menu.add_command(label="Check for Updates…", command=lambda: self.check_for_updates(True))
+            help_menu.add_separator()
+            help_menu.add_command(label=f"About {APP_NAME}", command=show_about)
+            menubar.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menubar)
+
+    def _startup_checks(self) -> None:
+        if updater.updates_supported() and time.time() - self.settings.last_update_check > 24 * 3600:
+            self.check_for_updates(manual=False)
+        threading.Thread(target=self._ytdlp_worker, args=(False,), daemon=True).start()
+
+    def _ytdlp_worker(self, after_error: bool) -> None:
+        try:
+            version = ytdlp_update.update(force=after_error)
+        except Exception as exc:  # noqa: BLE001 - never bother the user with this
+            log.warning("yt-dlp update failed: %s", exc)
+            version = None
+        self.events.put(("ytdlp_checked", (version, after_error)))
+
+    def _update_ytdlp_after_error(self) -> None:
+        """A failed download may mean YouTube changed: look for a newer yt-dlp once per session."""
+        if not self.ytdlp_retry_offered:
+            self.ytdlp_retry_offered = True
+            threading.Thread(target=self._ytdlp_worker, args=(True,), daemon=True).start()
+
+    def _on_ytdlp_checked(self, payload) -> None:
+        version, after_error = payload
+        if not version:
+            return
+        if after_error:
+            if messagebox.askyesno(APP_NAME, f"The download engine (yt-dlp) was just updated to {version}, "
+                                             f"which may fix this problem.\n\nRestart {APP_NAME} now to use it?"):
+                self._restart()
+        elif not self.busy:
+            self.status_var.set(f"Download engine updated to yt-dlp {version}; it is used from the next start.")
+
+    def check_for_updates(self, manual: bool) -> None:
+        if not updater.updates_supported():
+            if manual:
+                messagebox.showinfo(APP_NAME, "Automatic updates are only available in the installed app.")
+            return
+        self.settings.last_update_check = time.time()
+        self.settings.save()
+        threading.Thread(target=self._update_check_worker, args=(manual,), daemon=True).start()
+
+    def _update_check_worker(self, manual: bool) -> None:
+        try:
+            self.events.put(("update_checked", (updater.check(), manual, None)))
+        except updater.UpdateError as exc:
+            self.events.put(("update_checked", (None, manual, str(exc))))
+
+    def _on_update_checked(self, payload) -> None:
+        release, manual, error = payload
+        if error:
+            log.warning("Update check failed: %s", error)
+            if manual:
+                messagebox.showerror(APP_NAME, error)
+            return
+        if release is None:
+            if manual:
+                messagebox.showinfo(APP_NAME, f"You have the latest version ({__version__}).")
+            return
+        if not manual and release.version == self.settings.skipped_version:
+            return
+        UpdateDialog(self, release)
+
+    def start_update(self, release: updater.Release) -> None:
+        if self.busy:
+            self.pending_update = release
+            self.status_var.set(f"Version {release.version} will be installed when the current job finishes.")
+            return
+        self.update_window = UpdateProgress(self, release)
+
+    def _install_pending_update(self) -> None:
+        if self.pending_update is not None and not self.busy:
+            release, self.pending_update = self.pending_update, None
+            self.update_window = UpdateProgress(self, release)
+
+    def _on_update_progress(self, payload) -> None:
+        if self.update_window is not None:
+            self.update_window.show_progress(*payload)
+
+    def _on_update_failed(self, message: str) -> None:
+        if self.update_window is not None:
+            self.update_window.destroy()
+            self.update_window = None
+        messagebox.showerror(APP_NAME, message)
+
+    def _on_update_ready(self, package: Path) -> None:
+        if self.update_window is not None:
+            self.update_window.show_installing()
+        try:
+            updater.install_and_restart(package)
+        except updater.UpdateError as exc:
+            self._on_update_failed(str(exc))
+            return
+        self._quit_for_update()
+
+    def _quit_for_update(self) -> None:
+        self._keep_awake(False)
+        self._save_settings()
+        self.root.after(300, self.root.destroy)
+
+    def _restart(self) -> None:
+        self._save_settings()
+        updater.restart_app()
+        self.root.destroy()
+
+
+class UpdateDialog(tk.Toplevel):
+    """"A new version is available" with release notes and the three choices."""
+
+    def __init__(self, app: App, release: updater.Release):
+        super().__init__(app.root)
+        self.app, self.release = app, release
+        self.title("Update Available")
+        self.transient(app.root)
+        self.resizable(False, False)
+        frame = ttk.Frame(self, padding=16)
+        frame.grid(sticky="nsew")
+        heading = font.nametofont("TkDefaultFont").copy()
+        heading.configure(weight="bold", size=heading.cget("size") + 2)
+        ttk.Label(frame, text=f"{APP_NAME} {release.version} is available", font=heading)\
+            .grid(row=0, column=0, sticky="w")
+        size = f" · download {updater.describe_size(release.size)}" if release.size else ""
+        ttk.Label(frame, text=f"You have version {__version__}{size}.", foreground="gray")\
+            .grid(row=1, column=0, sticky="w", pady=(2, 8))
+        notes = tk.Text(frame, width=64, height=12, wrap="word", relief="flat", borderwidth=1)
+        notes.insert("1.0", updater.plain_notes(release.notes) or "No release notes.")
+        notes.configure(state="disabled")
+        notes.grid(row=2, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=notes.yview)
+        scroll.grid(row=2, column=1, sticky="ns")
+        notes.configure(yscrollcommand=scroll.set)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        buttons.columnconfigure(1, weight=1)
+        ttk.Button(buttons, text="Skip This Version", command=self.skip).grid(row=0, column=0)
+        ttk.Button(buttons, text="Later", command=self.destroy).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(buttons, text="Update Now", command=self.update_now, default="active")\
+            .grid(row=0, column=3)
+        if IS_WINDOWS:
+            ttk.Label(frame, text="Windows will ask for permission to install the update.",
+                      foreground="gray").grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+    def skip(self) -> None:
+        self.app.settings.skipped_version = self.release.version
+        self.app.settings.save()
+        self.destroy()
+
+    def update_now(self) -> None:
+        self.destroy()
+        self.app.start_update(self.release)
+
+
+class UpdateProgress(tk.Toplevel):
+    """Download progress for an update; the app quits once the installer has started."""
+
+    def __init__(self, app: App, release: updater.Release):
+        super().__init__(app.root)
+        self.app = app
+        self.cancel_event = threading.Event()
+        self.title("Updating")
+        self.transient(app.root)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        frame = ttk.Frame(self, padding=16)
+        frame.grid(sticky="nsew")
+        self.label_var = tk.StringVar(value=f"Downloading {APP_NAME} {release.version}…")
+        ttk.Label(frame, textvariable=self.label_var).grid(row=0, column=0, sticky="w")
+        self.bar = ttk.Progressbar(frame, length=360, maximum=1000)
+        self.bar.grid(row=1, column=0, pady=(8, 8))
+        self.cancel_button = ttk.Button(frame, text="Cancel", command=self.cancel)
+        self.cancel_button.grid(row=2, column=0, sticky="e")
+        threading.Thread(target=self._worker, args=(release,), daemon=True).start()
+
+    def _worker(self, release: updater.Release) -> None:
+        try:
+            path = updater.download(release, lambda done, total: self.app.events.put(
+                ("update_progress", (done, total))), self.cancel_event)
+            self.app.events.put(("update_ready", path))
+        except updater.UpdateError as exc:
+            if not self.cancel_event.is_set():
+                self.app.events.put(("update_failed", str(exc)))
+
+    def show_progress(self, done: int, total: int) -> None:
+        if total:
+            self.bar.configure(value=done / total * 1000)
+            self.label_var.set(f"Downloading… {updater.describe_size(done)} of {updater.describe_size(total)}")
+
+    def show_installing(self) -> None:
+        self.cancel_button.configure(state="disabled")
+        self.label_var.set("Installing the update…")
+        self.update_idletasks()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.app.update_window = None
+        self.destroy()
+
+
+def show_about() -> None:
+    try:
+        engine = f"yt-dlp {ytdlp_update.active_version()}"
+    except Exception:  # noqa: BLE001
+        engine = "yt-dlp"
+    messagebox.showinfo(APP_NAME, f"{APP_NAME} {__version__}\n\nPowered by {engine}, ffmpeg and Real-ESRGAN.")
 
 
 def _windows_keep_awake(on: bool) -> None:
@@ -603,8 +833,7 @@ def run() -> None:
     root.title(APP_NAME)
     if sys.platform == "darwin":
         # Standard "About" item in the application menu.
-        root.createcommand("tkAboutDialog", lambda: messagebox.showinfo(
-            APP_NAME, f"{APP_NAME} {__version__}\n\nPowered by yt-dlp, ffmpeg and Real-ESRGAN."))
+        root.createcommand("tkAboutDialog", show_about)
     App(root)
     root.update_idletasks()
     root.geometry(f"+{max((root.winfo_screenwidth() - root.winfo_width()) // 2, 0)}+120")

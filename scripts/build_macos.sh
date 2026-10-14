@@ -42,6 +42,11 @@ codesign --verify --deep --strict "$APP"
 echo "--- self-test ---"
 "$APP/Contents/MacOS/$APP_NAME" --self-test
 
+# Zip of the .app for the in-app updater (ditto keeps the bundle's symlinks and signature).
+UPDATE_ZIP="dist/YouTube-Downloader-$VERSION-macOS-$ARCH.zip"
+rm -f "$UPDATE_ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$UPDATE_ZIP"
+
 DMG="dist/YouTube-Downloader-$VERSION-macOS-$ARCH.dmg"
 STAGE="build/dmg"
 rm -rf "$STAGE" "$DMG"
@@ -60,3 +65,4 @@ done
 echo
 echo "Built: $APP"
 echo "Disk image: $DMG"
+echo "Update zip: $UPDATE_ZIP"
