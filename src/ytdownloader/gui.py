@@ -162,8 +162,9 @@ class App:
                                         values=list(CONTENT_LABELS), width=22)
         self.content_box.grid(row=0, column=2, padx=(8, 0))
         upscale_hint = ("Uses Real-ESRGAN AI on your Mac's GPU to add detail to low-resolution videos. "
-                        "\u201cBest quality\u201d is slow (a few minutes of video can take an hour or more); "
-                        "\u201cfast\u201d is several times quicker with a little less fine detail."
+                        "On an M1: \u201cbest quality\u201d does about 0.3 frames/s (hours for a few "
+                        "minutes of video), \u201cfast\u201d about 6 frames/s with a little less fine detail, "
+                        "animation about 12 frames/s."
                         if self.upscaler_available else "The AI upscaler is not included in this build.")
         self.upscale_hint = ttk.Label(options, text=upscale_hint, foreground="gray", wraplength=480,
                                       justify="left")

@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import platform
 import queue
 import shutil
 import struct
@@ -48,11 +49,18 @@ class Content(str, Enum):
     ANIMATION = "animation"  # cartoons/anime: realesr-animevideov3 (fast)
 
 
-# Real-ESRGAN tuning: tile size (-t) and load:process:save threads (-j).
-# Chosen from benchmarks on an Apple Silicon Mac; override with YTD_UPSCALE_TILE /
-# YTD_UPSCALE_THREADS.
-DEFAULT_TILE = {"realesrgan-x4plus": "0", "realesr-general-x4v3": "0", "realesr-animevideov3": "0"}
-DEFAULT_THREADS = "1:2:2"
+# Real-ESRGAN tuning: tile size (-t) and load:process:save threads (-j), from
+# scripts/bench_upscale.py on an Apple Silicon Mac (640x360 frames, x4):
+#   model                  auto tile   tile 512
+#   realesrgan-x4plus        0.31 f/s   0.37 f/s
+#   realesr-general-x4v3     5.3  f/s   6.3  f/s
+#   realesr-animevideov3     9.4  f/s  11.7  f/s
+# Apple Silicon shares memory between CPU and GPU, so large tiles are safe there.
+# Intel Macs keep the automatic choice, which is sized to the GPU's own memory.
+# Override with YTD_UPSCALE_TILE / YTD_UPSCALE_THREADS.
+APPLE_SILICON = platform.system() == "Darwin" and platform.machine() == "arm64"
+DEFAULT_TILE = "512" if APPLE_SILICON else "0"
+DEFAULT_THREADS = "2:2:2"
 
 
 class UpscaleError(Exception):
@@ -124,7 +132,7 @@ def plan(width: int, height: int, target: int, content: Content) -> Plan:
 
 
 def realesrgan_tuning(model: str) -> list[str]:
-    tile = os.environ.get("YTD_UPSCALE_TILE") or DEFAULT_TILE.get(model, "0")
+    tile = os.environ.get("YTD_UPSCALE_TILE") or DEFAULT_TILE
     threads = os.environ.get("YTD_UPSCALE_THREADS") or DEFAULT_THREADS
     return ["-t", tile, "-j", threads]
 
@@ -359,7 +367,14 @@ def upscale_video(
             on_progress(0.0 if total else None,
                         f"AI upscaling — preparing the AI model on the GPU… ({_hms(now - started)})")
             return
-        rate = done / max(now - first_frame_at, 1e-6)
+        measured = now - first_frame_at
+        if measured < 2.0 or done < 2:
+            # Too early for a meaningful speed (frames finished together would show nonsense).
+            on_progress(min(done / total, 1.0) if total else None,
+                        f"AI upscaling — frame {done:,}" + (f" of {total:,}" if total else "")
+                        + " · measuring speed…")
+            return
+        rate = (done - 1) / measured  # frames finished since the first one appeared
         if total:
             remaining = max(total - done, 0) / rate
             on_progress(min(done / total, 1.0),

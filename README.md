@@ -12,8 +12,17 @@ A small Mac app that downloads YouTube videos as **MP4** in any quality YouTube 
 - **AI upscale** (to 1080p, 1440p or 4K) uses [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) on the Mac's own graphics chip, through Metal. It adds real detail instead of just enlarging the picture.
   - Three models:
     - **Real-life · best quality** (`realesrgan-x4plus`) gives the most detail and is the slowest.
-    - **Real-life · fast** (`realesr-general-x4v3`) is several times quicker, with slightly less fine detail.
+    - **Real-life · fast** (`realesr-general-x4v3`) is about 17× quicker, with slightly less fine detail.
     - **Animation / cartoons** (`realesr-animevideov3`) is fast and made for drawn content.
+  - Measured speeds on an Apple Silicon Mac (GitHub's M1-class machine), upscaling 360p video 4×:
+
+    | Model | Frames per second | 3-minute video at 30 fps |
+    |---|---|---|
+    | Real-life · best quality | ~0.37 | ~4 hours |
+    | Real-life · fast | ~6.3 | ~15 minutes |
+    | Animation / cartoons | ~11.7 | ~8 minutes |
+
+    A fanless MacBook Air can be slower on long jobs, once it heats up and throttles.
   - It works on downloads that are below the chosen resolution, and on videos already on your Mac, through **Upscale a Video File…**.
   - It is slow: every frame goes through the AI model. With the best-quality model, a few minutes of video can take an hour or more.
   - The app shows frames per second and time left from the first frame on, and keeps the Mac awake meanwhile.
