@@ -108,6 +108,11 @@ def self_test() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # "—" and "…" on Windows consoles
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     if args.self_test:
         return self_test()

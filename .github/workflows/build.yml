@@ -73,6 +73,7 @@ jobs:
           ls -la "$RUNNER_TEMP/upscaled"
 
       - name: Benchmark AI upscaler settings (informational)
+        if: matrix.arch == 'arm64'  # Intel runners have no usable GPU; it would only take long
         continue-on-error: true
         timeout-minutes: 30
         run: python scripts/bench_upscale.py "dist/YouTube Downloader.app"

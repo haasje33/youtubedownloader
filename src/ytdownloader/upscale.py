@@ -482,7 +482,7 @@ def _upscale_video_ncnn(source: Path, destination: Path, info: VideoProbe, p: Pl
                             raise UpscaleError(
                                 "The AI upscaler stopped unexpectedly ("
                                 + _last_line(esrgan_err, skip_progress=True)
-                                + "). Your Mac's GPU may not support it.")
+                                + "). This computer's graphics card may not support it.")
                         report()
                         time.sleep(0.05)
                     frame = path.read_bytes()
