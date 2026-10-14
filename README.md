@@ -10,9 +10,14 @@ A small Mac app that downloads YouTube videos as **MP4** in any quality YouTube 
   - **Original stream (AV1 / VP9)**. No conversion, so it's the fastest and loses no quality. QuickTime can't play every one of these files, but VLC and IINA can.
 - Shows progress, speed and time left. You can cancel a download, and the files are saved to `~/Downloads` by default.
 - **AI upscale** (to 1080p, 1440p or 4K) uses [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) on the Mac's own graphics chip, through Metal. It adds real detail instead of just enlarging the picture.
-  - Choose **Real-life video** for camera footage, or **Animation / cartoons** for drawn content (that model is much faster).
+  - Three models:
+    - **Real-life · best quality** (`realesrgan-x4plus`) gives the most detail and is the slowest.
+    - **Real-life · fast** (`realesr-general-x4v3`) is several times quicker, with slightly less fine detail.
+    - **Animation / cartoons** (`realesr-animevideov3`) is fast and made for drawn content.
   - It works on downloads that are below the chosen resolution, and on videos already on your Mac, through **Upscale a Video File…**.
-  - It is slow: every frame goes through the AI model, so a few minutes of video can take an hour or more. The app shows the time left and keeps the Mac awake meanwhile.
+  - It is slow: every frame goes through the AI model. With the best-quality model, a few minutes of video can take an hour or more.
+  - The app shows frames per second and time left from the first frame on, and keeps the Mac awake meanwhile.
+  - Repeated identical frames, such as still images, are upscaled once and reused.
   - The model upscales 4×. From 360p it really adds detail up to 1440p; going to 4K enlarges that result further.
   - There is no NVIDIA option: Macs don't have NVIDIA graphics, and NVIDIA's own upscaler only runs on Windows.
 - Optional "Use cookies from" setting (Safari, Chrome, Firefox and others) for age-restricted videos, or when YouTube asks you to sign in.
@@ -49,7 +54,8 @@ APP="/Applications/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
 "$APP" "https://www.youtube.com/watch?v=VIDEO_ID" -q 1080 -m original -o ~/Movies
 "$APP" "https://www.youtube.com/watch?v=VIDEO_ID" --mp3                   # audio only
 "$APP" "https://www.youtube.com/watch?v=VIDEO_ID" --upscale-to 1080       # AI upscale if below 1080p
-"$APP" --upscale-file old-video.mp4 --upscale-to 1080 --content realistic # upscale a local file
+"$APP" --upscale-file old-video.mp4 --upscale-to 1080 --content fast     # upscale a local file
+                                                   # (--content realistic | fast | animation)
 "$APP" --self-test                                                # check the bundled tools
 ```
 
@@ -95,6 +101,7 @@ src/ytdownloader/
   gui.py         Tk user interface
   cli.py         command-line interface and --self-test
 packaging/       PyInstaller spec and entry script
-scripts/         build_macos.sh, fetch_tools.sh, make_icon.py
+scripts/         build_macos.sh, fetch_tools.sh, make_icon.py,
+                 convert_srvgg_to_ncnn.py (builds the Fast model), bench_upscale.py
 tests/           format-selection tests and offline end-to-end pipeline tests
 ```
