@@ -66,9 +66,16 @@ jobs:
           APP="dist/YouTube Downloader.app/Contents"
           "$APP/Frameworks/bin/ffmpeg" -loglevel error -y -f lavfi -i testsrc2=size=160x90:rate=10:duration=1 \
             -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/tiny.mp4"
-          "$APP/MacOS/YouTube Downloader" --upscale-file "$RUNNER_TEMP/tiny.mp4" --upscale-to 1080 \
-            --content animation -o "$RUNNER_TEMP/upscaled" -v
+          for model in fast animation realistic; do
+            "$APP/MacOS/YouTube Downloader" --upscale-file "$RUNNER_TEMP/tiny.mp4" --upscale-to 1080 \
+              --content "$model" -o "$RUNNER_TEMP/upscaled" -v
+          done
           ls -la "$RUNNER_TEMP/upscaled"
+
+      - name: Benchmark AI upscaler settings (informational)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: python scripts/bench_upscale.py "dist/YouTube Downloader.app"
 
       - uses: actions/upload-artifact@v4
         with:

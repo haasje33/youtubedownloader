@@ -41,7 +41,11 @@ AUDIO_ONLY = 0  # quality-list value meaning "MP3 audio only"
 AUDIO_LABEL = "Audio only (MP3)"
 UPSCALE_OFF = "Off"
 UPSCALE_LABELS = {upscale.target_label(t): t for t in upscale.UPSCALE_TARGETS}
-CONTENT_LABELS = {"Real-life video": Content.REALISTIC, "Animation / cartoons": Content.ANIMATION}
+CONTENT_LABELS = {
+    "Real-life · best quality": Content.REALISTIC,
+    "Real-life · fast": Content.FAST,
+    "Animation / cartoons": Content.ANIMATION,
+}
 VIDEO_FILETYPES = [("Video files", "*.mp4 *.m4v *.mov *.mkv *.webm *.avi"), ("All files", "*")]
 
 
@@ -150,15 +154,16 @@ class App:
                                         values=[UPSCALE_OFF, *UPSCALE_LABELS], width=16)
         self.upscale_box.grid(row=0, column=0)
         self.upscale_box.bind("<<ComboboxSelected>>", lambda e: self._update_estimate())
-        ttk.Label(upscale_row, text="Video type:").grid(row=0, column=1, padx=(12, 0))
+        ttk.Label(upscale_row, text="Model:").grid(row=0, column=1, padx=(12, 0))
         saved_content = next((k for k, v in CONTENT_LABELS.items()
-                              if v.value == self.settings.upscale_content), "Real-life video")
+                              if v.value == self.settings.upscale_content), "Real-life · best quality")
         self.content_var = tk.StringVar(value=saved_content)
         self.content_box = ttk.Combobox(upscale_row, textvariable=self.content_var, state="readonly",
-                                        values=list(CONTENT_LABELS), width=18)
+                                        values=list(CONTENT_LABELS), width=22)
         self.content_box.grid(row=0, column=2, padx=(8, 0))
         upscale_hint = ("Uses Real-ESRGAN AI on your Mac's GPU to add detail to low-resolution videos. "
-                        "It is slow: a few minutes of video can take an hour or more."
+                        "\u201cBest quality\u201d is slow (a few minutes of video can take an hour or more); "
+                        "\u201cfast\u201d is several times quicker with a little less fine detail."
                         if self.upscaler_available else "The AI upscaler is not included in this build.")
         self.upscale_hint = ttk.Label(options, text=upscale_hint, foreground="gray", wraplength=480,
                                       justify="left")

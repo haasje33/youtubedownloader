@@ -1,3 +1,4 @@
 -r requirements.txt
 pyinstaller>=6.10
 pillow>=10
+numpy>=1.26  # scripts/convert_srvgg_to_ncnn.py

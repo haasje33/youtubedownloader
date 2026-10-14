@@ -23,8 +23,8 @@ fi
 "$PYTHON" -m pip install --upgrade -r requirements-build.txt
 
 for tool in ffmpeg ffprobe deno realesrgan-ncnn-vulkan; do
-  if [ ! -x "vendor/bin/$tool" ] || [ ! -d vendor/realesrgan-models ]; then
-    scripts/fetch_tools.sh "$ARCH"
+  if [ ! -x "vendor/bin/$tool" ] || [ ! -f vendor/realesrgan-models/realesr-general-x4v3.bin ]; then
+    PYTHON="$PYTHON" scripts/fetch_tools.sh "$ARCH"
     break
   fi
 done

@@ -1,10 +1,13 @@
 """AI video upscaling with Real-ESRGAN (runs on the Mac's GPU through Metal).
 
-Frames flow through three processes with bounded disk use:
+Frames flow through a pipeline with bounded disk use:
 
-    ffmpeg (decode, PNG frames on a pipe)
-      -> chunks of PNG files -> realesrgan-ncnn-vulkan (upscale a chunk)
-      -> ffmpeg (scale to the exact target size, encode HEVC, copy audio)
+    ffmpeg decoder --PNG frames on a pipe--> producer thread
+        writes large chunks of frames to disk, skipping exact repeats,
+        and prepares the next chunk while the GPU works on the current one
+    realesrgan-ncnn-vulkan, one process per chunk (the model loads once per chunk)
+    main thread streams each finished frame into
+    ffmpeg encoder (scale to the exact target size, encode HEVC, copy audio)
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import queue
 import shutil
 import struct
 import subprocess
@@ -29,13 +34,25 @@ from . import tools
 log = logging.getLogger(__name__)
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-CHUNK_FRAMES = 96
+PNG_TRAILER = b"IEND\xaeB`\x82"
+# A chunk ends at whichever limit comes first; restarting Real-ESRGAN (reloading the
+# model on the GPU) only happens once per chunk.
+CHUNK_MAX_FRAMES = 1000
+CHUNK_MAX_BYTES = 250 * 1024 * 1024
 UPSCALE_TARGETS = (1080, 1440, 2160)
 
 
 class Content(str, Enum):
-    REALISTIC = "realistic"  # camera footage: realesrgan-x4plus (slow, best detail)
+    REALISTIC = "realistic"  # camera footage, best detail: realesrgan-x4plus (slow)
+    FAST = "fast"            # camera footage, faster: realesr-general-x4v3
     ANIMATION = "animation"  # cartoons/anime: realesr-animevideov3 (fast)
+
+
+# Real-ESRGAN tuning: tile size (-t) and load:process:save threads (-j).
+# Chosen from benchmarks on an Apple Silicon Mac; override with YTD_UPSCALE_TILE /
+# YTD_UPSCALE_THREADS.
+DEFAULT_TILE = {"realesrgan-x4plus": "0", "realesr-general-x4v3": "0", "realesr-animevideov3": "0"}
+DEFAULT_THREADS = "1:2:2"
 
 
 class UpscaleError(Exception):
@@ -101,7 +118,15 @@ def plan(width: int, height: int, target: int, content: Content) -> Plan:
     if content is Content.ANIMATION:
         scale = min(4, max(2, math.ceil(factor - 0.01)))
         return Plan("realesr-animevideov3", scale, out_w, out_h)
+    if content is Content.FAST:
+        return Plan("realesr-general-x4v3", 4, out_w, out_h)
     return Plan("realesrgan-x4plus", 4, out_w, out_h)
+
+
+def realesrgan_tuning(model: str) -> list[str]:
+    tile = os.environ.get("YTD_UPSCALE_TILE") or DEFAULT_TILE.get(model, "0")
+    threads = os.environ.get("YTD_UPSCALE_THREADS") or DEFAULT_THREADS
+    return ["-t", tile, "-j", threads]
 
 
 def target_label(target: int) -> str:
@@ -174,6 +199,92 @@ def _read_exact(stream: IO[bytes], size: int) -> bytes:
 ProgressFn = Callable[[float | None, str], None]
 
 
+class UpscaleCancelled(Exception):
+    pass
+
+
+class _Stop(Exception):
+    pass
+
+
+def _png_complete(path: Path) -> bool:
+    """True once Real-ESRGAN has finished writing `path`."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-len(PNG_TRAILER), os.SEEK_END)
+            return fh.read() == PNG_TRAILER
+    except OSError:  # missing, or still shorter than the trailer
+        return False
+
+
+class _FrameProducer(threading.Thread):
+    """Reads decoded frames and groups them into chunk directories.
+
+    Exact repeats of the previous frame (still images, paused scenes, frames that
+    ffmpeg duplicated for a constant frame rate) are not written: the consumer
+    reuses the previous upscaled frame, which gives an identical result.
+    Each queued item is (directory, order) where `order` lists, for every output
+    frame, the number of the unique frame to show.
+    """
+
+    def __init__(self, stream: IO[bytes], work: Path, stop: threading.Event):
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.work = work
+        self.stop_event = stop
+        self.chunks: queue.Queue = queue.Queue(maxsize=1)  # at most one chunk prepared ahead
+        self.unique = 0
+        self.repeats = 0
+
+    def run(self) -> None:
+        try:
+            previous = None
+            index = 0
+            finished = False
+            while not finished:
+                directory = self.work / f"chunk{index:05d}"
+                directory.mkdir()
+                order: list[int] = []
+                written = size = 0
+                while written < CHUNK_MAX_FRAMES and size < CHUNK_MAX_BYTES:
+                    if self.stop_event.is_set():
+                        return
+                    frame = read_png(self.stream)
+                    if frame is None:
+                        finished = True
+                        break
+                    if frame == previous:
+                        order.append(self.unique - 1)
+                        self.repeats += 1
+                        continue
+                    (directory / f"{self.unique:08d}.png").write_bytes(frame)
+                    order.append(self.unique)
+                    self.unique += 1
+                    written += 1
+                    size += len(frame)
+                    previous = frame
+                if order:
+                    self._put((directory, order))
+                index += 1
+            self._put(None)
+        except _Stop:
+            pass
+        except Exception as exc:  # noqa: BLE001 - handed to the consumer
+            try:
+                self._put(exc)
+            except _Stop:
+                pass
+
+    def _put(self, item) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.chunks.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+        raise _Stop()
+
+
 def upscale_video(
     source: Path,
     destination: Path,
@@ -194,13 +305,14 @@ def upscale_video(
 
     info = probe(source)
     p = plan(info.width, info.height, target, content)
+    if not (models / f"{p.model}.param").exists() and not (models / f"{p.model}-x{p.scale}.param").exists():
+        raise UpscaleError(f"The AI model {p.model} is missing from this build.")
     total = info.estimated_frames
     log.info("Upscaling %s (%dx%d @ %s) with %s x%d to %dx%d", source.name, info.width, info.height,
              info.frame_rate, p.model, p.scale, p.out_width, p.out_height)
 
     work = Path(tempfile.mkdtemp(prefix="ytdownloader-upscale-"))
-    in_dir, out_dir = work / "in", work / "out"
-    in_dir.mkdir()
+    out_dir = work / "out"
     out_dir.mkdir()
     partial = destination.with_name(destination.name + ".part.mp4")
     audio_args = (["-c:a", "copy"] if info.audio_codec == "aac"
@@ -208,6 +320,7 @@ def upscale_video(
 
     decoder_err = open(work / "decoder.log", "w+")
     encoder_err = open(work / "encoder.log", "w+")
+    esrgan_err = open(work / "realesrgan.log", "w+")
     decoder = subprocess.Popen(
         [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(source),
          "-map", "0:v:0", "-vf", f"fps={info.frame_rate}",
@@ -224,45 +337,97 @@ def upscale_video(
          "-movflags", "+faststart", str(partial)],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=encoder_err,
     )
-    processes = [decoder, encoder]
+    processes: list[subprocess.Popen] = [decoder, encoder]
+    stop = threading.Event()
+    assert decoder.stdout is not None and encoder.stdin is not None
+    producer = _FrameProducer(decoder.stdout, work, stop)
+    producer.start()
+
     started = time.monotonic()
+    first_frame_at: float | None = None
+    last_report = 0.0
     done = 0
+    last_unique, last_frame = -1, b""
+
+    def report(force: bool = False) -> None:
+        nonlocal last_report
+        now = time.monotonic()
+        if not force and now - last_report < 0.5:
+            return
+        last_report = now
+        if first_frame_at is None or done == 0:
+            on_progress(0.0 if total else None,
+                        f"AI upscaling — preparing the AI model on the GPU… ({_hms(now - started)})")
+            return
+        rate = done / max(now - first_frame_at, 1e-6)
+        if total:
+            remaining = max(total - done, 0) / rate
+            on_progress(min(done / total, 1.0),
+                        f"AI upscaling — frame {done:,} of {total:,} · {rate:.1f} frames/s · "
+                        f"{_hms(remaining)} left")
+        else:
+            on_progress(None, f"AI upscaling — {done:,} frames · {rate:.1f} frames/s")
+
+    def check_cancel() -> None:
+        if cancel_event.is_set():
+            raise UpscaleCancelled()
+
     try:
-        assert decoder.stdout is not None and encoder.stdin is not None
-        on_progress(0.0 if total else None, "AI upscaling — loading model…")
-        finished = False
-        while not finished:
-            batch = 0
-            while batch < CHUNK_FRAMES:
-                frame = read_png(decoder.stdout)
-                if frame is None:
-                    finished = True
-                    break
-                (in_dir / f"{done + batch:08d}.png").write_bytes(frame)
-                batch += 1
-            if cancel_event.is_set():
-                raise _Cancelled()
-            if batch == 0:
+        report(force=True)
+        while True:
+            try:
+                item = producer.chunks.get(timeout=0.2)
+            except queue.Empty:
+                check_cancel()
+                report()
+                continue
+            if item is None:
                 break
+            if isinstance(item, Exception):
+                raise item
+            chunk_dir, order = item
 
-            _run_realesrgan(exe, models, p, in_dir, out_dir, cancel_event, processes)
+            esrgan = None
+            if any(chunk_dir.iterdir()):
+                esrgan_err.seek(0)
+                esrgan_err.truncate()
+                esrgan = subprocess.Popen(
+                    [exe, "-i", str(chunk_dir), "-o", str(out_dir), "-n", p.model, "-s", str(p.scale),
+                     "-m", str(models), "-f", "png", *realesrgan_tuning(p.model)],
+                    stdout=subprocess.DEVNULL, stderr=esrgan_err, cwd=str(models.parent),
+                )
+                processes.append(esrgan)
 
-            for frame_path in sorted(out_dir.iterdir()):
-                encoder.stdin.write(frame_path.read_bytes())
-                frame_path.unlink()
-            for frame_path in in_dir.iterdir():
-                frame_path.unlink()
-            done += batch
+            for unique in order:
+                if unique == last_unique:
+                    frame = last_frame  # exact repeat of the previous frame
+                else:
+                    path = out_dir / f"{unique:08d}.png"
+                    while not _png_complete(path):
+                        check_cancel()
+                        if esrgan is None or esrgan.poll() is not None:
+                            if _png_complete(path):
+                                break
+                            raise UpscaleError(
+                                "The AI upscaler stopped unexpectedly ("
+                                + _last_line(esrgan_err, skip_progress=True)
+                                + "). Your Mac's GPU may not support it.")
+                        report()
+                        time.sleep(0.05)
+                    frame = path.read_bytes()
+                    path.unlink()
+                    last_unique, last_frame = unique, frame
+                    if first_frame_at is None:
+                        first_frame_at = time.monotonic()
+                encoder.stdin.write(frame)
+                done += 1
+                check_cancel()
+                report()
 
-            elapsed = time.monotonic() - started
-            per_frame = elapsed / done
-            if total:
-                fraction = min(done / total, 1.0)
-                remaining = max(total - done, 0) * per_frame
-                on_progress(fraction, f"AI upscaling — frame {done:,} of {total:,} · "
-                                      f"{1 / per_frame:.1f} frames/s · {_hms(remaining)} left")
-            else:
-                on_progress(None, f"AI upscaling — {done:,} frames · {1 / per_frame:.1f} frames/s")
+            if esrgan is not None:
+                esrgan.wait()
+                processes.remove(esrgan)
+            shutil.rmtree(chunk_dir, ignore_errors=True)
 
         encoder.stdin.close()
         on_progress(None, "Finishing video…")
@@ -272,63 +437,32 @@ def upscale_video(
             raise UpscaleError("Reading the source video failed: " + _last_line(decoder_err))
         if done == 0:
             raise UpscaleError("The video contained no frames.")
+        log.info("Upscaled %d frames (%d unique, %d repeats skipped) in %.0f s", done,
+                 producer.unique, producer.repeats, time.monotonic() - started)
         partial.replace(destination)
-    except _Cancelled:
-        raise UpscaleCancelled() from None
     except BrokenPipeError:
         if cancel_event.is_set():
             raise UpscaleCancelled() from None
         raise UpscaleError("Encoding the upscaled video failed: " + _last_line(encoder_err)) from None
     finally:
+        stop.set()
         for proc in processes:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-        decoder_err.close()
-        encoder_err.close()
+        producer.join(timeout=5)
+        for fh in (decoder_err, encoder_err, esrgan_err):
+            fh.close()
         partial.unlink(missing_ok=True)
         shutil.rmtree(work, ignore_errors=True)
 
 
-class _Cancelled(Exception):
-    pass
-
-
-class UpscaleCancelled(Exception):
-    pass
-
-
-def _run_realesrgan(exe: str, models: Path, p: Plan, in_dir: Path, out_dir: Path,
-                    cancel_event: threading.Event, processes: list) -> None:
-    cmd = [exe, "-i", str(in_dir), "-o", str(out_dir), "-n", p.model, "-s", str(p.scale),
-           "-m", str(models), "-f", "png"]
-    with tempfile.TemporaryFile(mode="w+") as err:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, cwd=str(models.parent))
-        processes.append(proc)
-        try:
-            while proc.poll() is None:
-                if cancel_event.is_set():
-                    proc.terminate()
-                    proc.wait()
-                    raise _Cancelled()
-                time.sleep(0.1)
-        finally:
-            processes.remove(proc)
-        expected = len(list(in_dir.iterdir()))
-        produced = len(list(out_dir.iterdir()))
-        if proc.returncode != 0 or produced != expected:
-            err.seek(0)
-            lines = [line for line in err.read().splitlines()
-                     if line.strip() and "%" not in line]
-            detail = lines[-1] if lines else f"exit code {proc.returncode}"
-            raise UpscaleError(
-                f"The AI upscaler failed ({detail}). Your Mac's GPU may not support it.")
-
-
-def _last_line(fh) -> str:
+def _last_line(fh, skip_progress: bool = False) -> str:
     fh.flush()
     fh.seek(0)
     lines = [line for line in fh.read().splitlines() if line.strip()]
+    if skip_progress:
+        lines = [line for line in lines if not line.strip().endswith("%")]
     return lines[-1] if lines else "unknown error"
 
 

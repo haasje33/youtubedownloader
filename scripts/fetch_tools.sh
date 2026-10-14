@@ -55,6 +55,11 @@ mkdir -p "$MODELS"
 for model in realesrgan-x4plus realesr-animevideov3-x2 realesr-animevideov3-x3 realesr-animevideov3-x4; do
   cp "$WORK/realesrgan/models/$model.param" "$WORK/realesrgan/models/$model.bin" "$MODELS/"
 done
+# The faster real-life model is only published as a PyTorch checkpoint; convert it.
+fetch "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth" \
+  "$WORK/realesr-general-x4v3.pth"
+"${PYTHON:-python3}" "$ROOT/scripts/convert_srvgg_to_ncnn.py" "$WORK/realesr-general-x4v3.pth" \
+  "$MODELS/realesr-general-x4v3"
 
 if [ "$(uname -s)" = "Darwin" ]; then
   xattr -cr "$DEST" 2>/dev/null || true

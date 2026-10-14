@@ -29,7 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="AI-upscale videos below this resolution (Real-ESRGAN, slow)")
     parser.add_argument("--content", choices=[c.value for c in upscale.Content],
                         default=upscale.Content.REALISTIC.value,
-                        help="video type for the AI upscaler (default: realistic)")
+                        help="AI upscaler model: realistic (best quality, slow), fast (real-life, "
+                             "several times faster) or animation (default: realistic)")
     parser.add_argument("--upscale-file", type=Path, metavar="VIDEO",
                         help="AI-upscale a local video file instead of downloading (needs --upscale-to)")
     parser.add_argument("-l", "--list", action="store_true", help="only list available qualities")
@@ -61,6 +62,11 @@ def self_test() -> int:
     paths = upscale.upscaler_paths()
     if paths:
         print(f"realesrgan: {paths[0]}\n    models: {paths[1]}")
+        for model in ("realesrgan-x4plus", "realesr-general-x4v3", "realesr-animevideov3-x2",
+                      "realesr-animevideov3-x3", "realesr-animevideov3-x4"):
+            if not (paths[1] / f"{model}.bin").exists():
+                print(f"    model {model}: MISSING")
+                ok = False
     else:
         print("realesrgan: MISSING")
         ok = False
