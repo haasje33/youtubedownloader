@@ -138,6 +138,29 @@ def _audio_sort_key(fmt: dict):
     )
 
 
+def _mp3_source_key(fmt: dict):
+    format_id = str(fmt.get("format_id", ""))
+    note = (fmt.get("format_note") or "").lower()
+    return (
+        "drc" not in format_id and "drc" not in note,
+        fmt.get("language_preference") or 0,
+        fmt.get("abr") or fmt.get("tbr") or 0,  # converting anyway, so just take the richest source
+    )
+
+
+def select_audio(formats: list[dict]) -> dict:
+    """Best source stream for an MP3 (audio-only if possible)."""
+    usable = [f for f in formats if _usable(f)]
+    audio_only = [f for f in usable if is_audio_only(f)]
+    if audio_only:
+        return max(audio_only, key=_mp3_source_key)
+    combined = [f for f in usable if has_audio(f)]
+    if combined:
+        # Smallest video tier with the best audio keeps the download small.
+        return max(combined, key=lambda f: (_mp3_source_key(f), -(format_tier(f) or 0)))
+    raise NoSuitableFormat("This video has no audio stream.")
+
+
 def available_tiers(formats: list[dict], cap: int = MAX_TIER) -> list[int]:
     """Tiers that actually exist for this video, best first."""
     tiers = {

@@ -4,6 +4,7 @@
 #   scripts/fetch_tools.sh [arm64|x86_64]
 #
 # ffmpeg/ffprobe: static builds from https://ffmpeg.martin-riedl.de (LGPL/GPL, see their site)
+# realesrgan:     https://github.com/xinntao/Real-ESRGAN (AI upscaling)
 # deno:           official release from https://github.com/denoland/deno (needed by yt-dlp
 #                 to solve YouTube's JavaScript challenges; without it 4K formats go missing)
 set -euo pipefail
@@ -42,11 +43,24 @@ fetch "https://github.com/denoland/deno/releases/download/$DENO_VERSION/deno-$DE
 unzip -q -o "$WORK/deno.zip" -d "$WORK/deno"
 install -m 0755 "$WORK/deno/deno" "$DEST/deno"
 
+# Real-ESRGAN (BSD-3-Clause) for AI upscaling. The macOS build is a universal binary
+# with MoltenVK built in, so it runs on the GPU of both Apple Silicon and Intel Macs.
+echo "Downloading Real-ESRGAN…"
+fetch "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip" "$WORK/realesrgan.zip"
+unzip -q -o "$WORK/realesrgan.zip" -d "$WORK/realesrgan"
+install -m 0755 "$WORK/realesrgan/realesrgan-ncnn-vulkan" "$DEST/realesrgan-ncnn-vulkan"
+MODELS="$ROOT/vendor/realesrgan-models"
+rm -rf "$MODELS"
+mkdir -p "$MODELS"
+for model in realesrgan-x4plus realesr-animevideov3-x2 realesr-animevideov3-x3 realesr-animevideov3-x4; do
+  cp "$WORK/realesrgan/models/$model.param" "$WORK/realesrgan/models/$model.bin" "$MODELS/"
+done
+
 if [ "$(uname -s)" = "Darwin" ]; then
   xattr -cr "$DEST" 2>/dev/null || true
 fi
 
-for tool in ffmpeg ffprobe deno; do
+for tool in ffmpeg ffprobe deno realesrgan-ncnn-vulkan; do
   file "$DEST/$tool" || true
 done
 echo "Tools installed in $DEST"

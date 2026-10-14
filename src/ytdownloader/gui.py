@@ -13,10 +13,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
-from . import APP_NAME, __version__, downloader, tools
+from . import APP_NAME, __version__, downloader, formats, tools, upscale
 from .downloader import Cancelled, DownloadFailed, Progress, VideoInfo, format_bytes, format_duration
 from .formats import Mode, tier_label
 from .settings import Settings
+from .upscale import Content
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ MODE_TEXT = {
 }
 BROWSERS = ["None"] + [b.capitalize() for b in downloader.SUPPORTED_BROWSERS]
 
+AUDIO_ONLY = 0  # quality-list value meaning "MP3 audio only"
+AUDIO_LABEL = "Audio only (MP3)"
+UPSCALE_OFF = "Off"
+UPSCALE_LABELS = {upscale.target_label(t): t for t in upscale.UPSCALE_TARGETS}
+CONTENT_LABELS = {"Real-life video": Content.REALISTIC, "Animation / cartoons": Content.ANIMATION}
+VIDEO_FILETYPES = [("Video files", "*.mp4 *.m4v *.mov *.mkv *.webm *.avi"), ("All files", "*")]
+
 
 class App:
     def __init__(self, root: tk.Tk):
@@ -47,6 +55,8 @@ class App:
         self.busy = False
         self.last_file: Path | None = None
         self.tier_by_label: dict[str, int] = {}
+        self.upscaler_available = upscale.is_available()
+        self.caffeinate: subprocess.Popen | None = None
 
         root.title(APP_NAME)
         root.minsize(640, 0)
@@ -70,7 +80,7 @@ class App:
         heading = font.nametofont("TkDefaultFont").copy()
         heading.configure(size=heading.cget("size") + 6, weight="bold")
         ttk.Label(outer, text=APP_NAME, font=heading).grid(row=0, column=0, sticky="w", **pad)
-        ttk.Label(outer, text="Paste a YouTube link, pick a quality and download it as MP4.")\
+        ttk.Label(outer, text="Paste a YouTube link, pick a quality and download it as MP4 or MP3.")\
             .grid(row=1, column=0, sticky="w", pady=(2, 12), **pad)
 
         # URL row
@@ -108,7 +118,7 @@ class App:
         self.quality_var = tk.StringVar()
         self.quality_box = ttk.Combobox(options, textvariable=self.quality_var, state="readonly", width=22)
         self.quality_box.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        self.quality_box.bind("<<ComboboxSelected>>", lambda e: self._update_estimate())
+        self.quality_box.bind("<<ComboboxSelected>>", lambda e: self._on_quality_changed())
 
         ttk.Label(options, text="Video format:").grid(row=1, column=0, sticky="nw", pady=(10, 0))
         self.mode_var = tk.StringVar(value=self.settings.mode if self.settings.mode in
@@ -131,13 +141,38 @@ class App:
         mode_frame.bind("<Configure>", lambda e: [
             d.configure(wraplength=max(e.width - 30, 200)) for d in descriptions])
 
+        ttk.Label(options, text="AI upscale:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        upscale_row = ttk.Frame(options)
+        upscale_row.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        # Deliberately not remembered: upscaling takes long, so it must be chosen each time.
+        self.upscale_var = tk.StringVar(value=UPSCALE_OFF)
+        self.upscale_box = ttk.Combobox(upscale_row, textvariable=self.upscale_var, state="readonly",
+                                        values=[UPSCALE_OFF, *UPSCALE_LABELS], width=16)
+        self.upscale_box.grid(row=0, column=0)
+        self.upscale_box.bind("<<ComboboxSelected>>", lambda e: self._update_estimate())
+        ttk.Label(upscale_row, text="Video type:").grid(row=0, column=1, padx=(12, 0))
+        saved_content = next((k for k, v in CONTENT_LABELS.items()
+                              if v.value == self.settings.upscale_content), "Real-life video")
+        self.content_var = tk.StringVar(value=saved_content)
+        self.content_box = ttk.Combobox(upscale_row, textvariable=self.content_var, state="readonly",
+                                        values=list(CONTENT_LABELS), width=18)
+        self.content_box.grid(row=0, column=2, padx=(8, 0))
+        upscale_hint = ("Uses Real-ESRGAN AI on your Mac's GPU to add detail to low-resolution videos. "
+                        "It is slow: a few minutes of video can take an hour or more."
+                        if self.upscaler_available else "The AI upscaler is not included in this build.")
+        self.upscale_hint = ttk.Label(options, text=upscale_hint, foreground="gray", wraplength=480,
+                                      justify="left")
+        self.upscale_hint.grid(row=3, column=1, sticky="w", padx=(8, 0))
+        options.bind("<Configure>", lambda e: self.upscale_hint.configure(
+            wraplength=max(e.width - 160, 200)))
+
         self.estimate_var = tk.StringVar()
         ttk.Label(options, textvariable=self.estimate_var, foreground="gray")\
-            .grid(row=2, column=1, sticky="w", padx=(8, 0))
+            .grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(options, text="Save to:").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(options, text="Save to:").grid(row=5, column=0, sticky="w", pady=(10, 0))
         folder_row = ttk.Frame(options)
-        folder_row.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+        folder_row.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
         folder_row.columnconfigure(0, weight=1)
         self.folder_var = tk.StringVar(value=self.settings.output_dir)
         ttk.Entry(folder_row, textvariable=self.folder_var, state="readonly")\
@@ -145,14 +180,14 @@ class App:
         self.folder_button = ttk.Button(folder_row, text="Change…", command=self.choose_folder)
         self.folder_button.grid(row=0, column=1, padx=(8, 0))
 
-        ttk.Label(options, text="Use cookies from:").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(options, text="Use cookies from:").grid(row=6, column=0, sticky="w", pady=(10, 0))
         self.cookies_var = tk.StringVar(
             value=(self.settings.cookies_from_browser or "none").capitalize())
         self.cookies_box = ttk.Combobox(options, textvariable=self.cookies_var, values=BROWSERS,
                                         state="readonly", width=12)
-        self.cookies_box.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        self.cookies_box.grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
         ttk.Label(options, text="Only needed for age-restricted videos or when YouTube asks you to sign in.",
-                  foreground="gray").grid(row=5, column=1, sticky="w", padx=(8, 0))
+                  foreground="gray").grid(row=7, column=1, sticky="w", padx=(8, 0))
 
         # Progress
         progress = ttk.Frame(outer)
@@ -164,8 +199,14 @@ class App:
         ttk.Label(progress, textvariable=self.status_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         # Buttons
-        buttons = ttk.Frame(outer)
-        buttons.grid(row=6, column=0, sticky="e", pady=(12, 0), **pad)
+        bottom = ttk.Frame(outer)
+        bottom.grid(row=6, column=0, sticky="ew", pady=(12, 0), **pad)
+        bottom.columnconfigure(1, weight=1)
+        self.upscale_file_button = ttk.Button(bottom, text="Upscale a Video File…",
+                                              command=self.upscale_local_file)
+        self.upscale_file_button.grid(row=0, column=0, sticky="w")
+        buttons = ttk.Frame(bottom)
+        buttons.grid(row=0, column=2, sticky="e")
         self.reveal_button = ttk.Button(buttons, text="Show in Finder", command=self.reveal)
         self.reveal_button.grid(row=0, column=0, padx=(0, 8))
         self.cancel_button = ttk.Button(buttons, text="Cancel", command=self.cancel)
@@ -182,8 +223,14 @@ class App:
         self.url_entry.configure(state="disabled" if self.busy else "normal")
         self.fetch_button.configure(state="disabled" if self.busy else "normal")
         self.quality_box.configure(state="readonly" if ready else "disabled")
+        audio = self._selected_tier() == AUDIO_ONLY
         for rb in self.mode_buttons:
-            rb.configure(state="disabled" if self.busy else "normal")
+            rb.configure(state="disabled" if self.busy or audio else "normal")
+        upscale_state = "readonly" if self.upscaler_available and not self.busy and not audio else "disabled"
+        self.upscale_box.configure(state=upscale_state)
+        self.content_box.configure(state=upscale_state)
+        self.upscale_file_button.configure(
+            state="normal" if self.upscaler_available and not self.busy else "disabled")
         self.folder_button.configure(state="disabled" if self.busy else "normal")
         self.cookies_box.configure(state="disabled" if self.busy else "readonly")
         self.download_button.configure(state="normal" if ready else "disabled")
@@ -234,6 +281,15 @@ class App:
     def _selected_tier(self) -> int | None:
         return self.tier_by_label.get(self.quality_var.get())
 
+    def _upscale_target(self) -> int | None:
+        return UPSCALE_LABELS.get(self.upscale_var.get())
+
+    def _content(self) -> Content:
+        return CONTENT_LABELS.get(self.content_var.get(), Content.REALISTIC)
+
+    def _resting_state(self) -> str:
+        return "ready" if self.info else "idle"
+
     # --- actions ------------------------------------------------------------
 
     def fetch(self) -> None:
@@ -264,32 +320,64 @@ class App:
         tier = self._selected_tier()
         if tier is None:
             return
+        url, folder, cookies = self.info.url, Path(self.folder_var.get()), self._cookies()
+        if tier == AUDIO_ONLY:
+            job = lambda progress, cancel: downloader.download_audio(  # noqa: E731
+                url, folder, on_progress=progress, cancel_event=cancel, cookies_from_browser=cookies)
+        else:
+            mode, target, content = self._mode(), self._upscale_target(), self._content()
+            job = lambda progress, cancel: downloader.download(  # noqa: E731
+                url, tier, mode, folder, on_progress=progress, cancel_event=cancel,
+                cookies_from_browser=cookies, upscale_to=target, upscale_content=content)
+        self._start_job(job)
+
+    def upscale_local_file(self) -> None:
+        if self.busy:
+            return
+        target = self._upscale_target()
+        if target is None:
+            messagebox.showinfo(APP_NAME, "First choose a resolution under \u201cAI upscale\u201d "
+                                          "(for example 1080p), then pick the video file.")
+            return
+        source = filedialog.askopenfilename(title="Choose a video to upscale", filetypes=VIDEO_FILETYPES)
+        if not source:
+            return
+        folder, content = Path(self.folder_var.get()), self._content()
+        self._start_job(lambda progress, cancel: downloader.upscale_file(
+            Path(source), folder, target, content, on_progress=progress, cancel_event=cancel))
+
+    def _start_job(self, job) -> None:
         self._save_settings()
         self.cancel_event = threading.Event()
         self.last_file = None
         self._set_state("downloading")
         self.progress.configure(value=0)
         self.status_var.set("Starting…")
-        args = (self.info.url, tier, self._mode(), Path(self.folder_var.get()),
-                self.cancel_event, self._cookies())
-        threading.Thread(target=self._download_worker, args=args, daemon=True).start()
+        self._keep_awake(True)
+        threading.Thread(target=self._job_worker, args=(job, self.cancel_event), daemon=True).start()
 
-    def _download_worker(self, url, tier, mode, folder, cancel_event, cookies) -> None:
+    def _job_worker(self, job, cancel_event) -> None:
         try:
-            path = downloader.download(
-                url, tier, mode, folder,
-                on_progress=lambda p: self.events.put(("progress", p)),
-                cancel_event=cancel_event,
-                cookies_from_browser=cookies,
-            )
+            path = job(lambda p: self.events.put(("progress", p)), cancel_event)
             self.events.put(("done", path))
         except Cancelled:
             self.events.put(("cancelled", None))
         except DownloadFailed as exc:
             self.events.put(("download_error", str(exc)))
         except Exception as exc:  # noqa: BLE001
-            log.exception("Download failed")
+            log.exception("Job failed")
             self.events.put(("download_error", downloader.friendly_error(exc)))
+
+    def _keep_awake(self, on: bool) -> None:
+        """Stop the Mac from sleeping during long downloads and upscales."""
+        if on and sys.platform == "darwin" and self.caffeinate is None:
+            try:
+                self.caffeinate = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+            except OSError:
+                self.caffeinate = None
+        elif not on and self.caffeinate is not None:
+            self.caffeinate.terminate()
+            self.caffeinate = None
 
     def cancel(self) -> None:
         if self.state == "downloading":
@@ -315,9 +403,7 @@ class App:
         self.settings.output_dir = self.folder_var.get()
         self.settings.mode = self.mode_var.get()
         self.settings.cookies_from_browser = self._cookies() or ""
-        tier = self._selected_tier()
-        if tier:
-            self.settings.quality = tier
+        self.settings.upscale_content = self._content().value
         self.settings.save()
 
     def _on_close(self) -> None:
@@ -325,6 +411,7 @@ class App:
             if not messagebox.askyesno(APP_NAME, "A download is in progress. Cancel it and quit?"):
                 return
             self.cancel_event.set()
+        self._keep_awake(False)
         self._save_settings()
         self.root.destroy()
 
@@ -346,13 +433,16 @@ class App:
         meta = [m for m in (info.uploader, format_duration(info.duration) if info.duration else None) if m]
         self.meta_var.set(" · ".join(meta))
         self.tier_by_label = {tier_label(t): t for t in info.tiers}
-        labels = list(self.tier_by_label)
-        self.quality_box.configure(values=labels)
-        preferred = next((t for t in info.tiers if t <= self.settings.quality), info.tiers[-1])
-        self.quality_var.set(tier_label(preferred))
+        self.tier_by_label[AUDIO_LABEL] = AUDIO_ONLY
+        self.quality_box.configure(values=list(self.tier_by_label))
+        self.quality_var.set(tier_label(info.tiers[0]))  # always start at the best quality
         self._set_state("ready")
         best = info.tiers[0]
         self.status_var.set(f"Ready. Best available quality: {tier_label(best)}.")
+        self._update_estimate()
+
+    def _on_quality_changed(self) -> None:
+        self._set_state(self.state)  # enable/disable the video-only options
         self._update_estimate()
 
     def _update_estimate(self) -> None:
@@ -361,6 +451,18 @@ class App:
             return
         tier = self._selected_tier()
         if tier is None:
+            return
+        if tier == AUDIO_ONLY:
+            try:
+                source = formats.select_audio(self.info.formats)
+            except formats.NoSuitableFormat:
+                self.estimate_var.set("")
+                return
+            size = source.get("filesize") or source.get("filesize_approx")
+            parts = ["MP3, best quality (VBR ~245 kbps), with title and cover art"]
+            if size:
+                parts.append(f"download ≈ {format_bytes(size)}")
+            self.estimate_var.set(" · ".join(parts))
             return
         try:
             selection = self.info.selection_for(tier, self._mode())
@@ -374,8 +476,14 @@ class App:
         codec = (selection.video.get("vcodec") or "?").split(".")[0]
         fps = selection.video.get("fps")
         parts.append(f"stream: {codec}{f' {fps:.0f} fps' if fps else ''}")
-        if self._mode() is Mode.COMPATIBLE and selection.needs_conversion:
+        target = self._upscale_target()
+        source_tier = selection.tier or tier
+        if target and source_tier < target:
+            parts.append(f"then AI-upscaled to {target}p (slow)")
+        elif self._mode() is Mode.COMPATIBLE and selection.needs_conversion:
             parts.append("will be converted to HEVC")
+        if target and source_tier >= target:
+            parts.append(f"already ≥ {target}p, so no upscaling")
         self.estimate_var.set(" · ".join(parts))
 
     def _on_fetch_error(self, message: str) -> None:
@@ -399,6 +507,7 @@ class App:
             self.status_var.set(p.detail)
 
     def _on_done(self, path: Path) -> None:
+        self._keep_awake(False)
         self.last_file = path
         self._set_state("done")
         self.progress.configure(value=1000)
@@ -406,14 +515,16 @@ class App:
         self.root.bell()
 
     def _on_cancelled(self, _payload) -> None:
-        self._set_state("ready")
+        self._keep_awake(False)
+        self._set_state(self._resting_state())
         self.progress.configure(value=0)
-        self.status_var.set("Download cancelled.")
+        self.status_var.set("Cancelled.")
 
     def _on_download_error(self, message: str) -> None:
-        self._set_state("ready")
+        self._keep_awake(False)
+        self._set_state(self._resting_state())
         self.progress.configure(value=0)
-        self.status_var.set("Download failed.")
+        self.status_var.set("Failed.")
         messagebox.showerror(APP_NAME, message)
 
 
@@ -423,7 +534,7 @@ def run() -> None:
     if sys.platform == "darwin":
         # Standard "About" item in the application menu.
         root.createcommand("tkAboutDialog", lambda: messagebox.showinfo(
-            APP_NAME, f"{APP_NAME} {__version__}\n\nPowered by yt-dlp and ffmpeg."))
+            APP_NAME, f"{APP_NAME} {__version__}\n\nPowered by yt-dlp, ffmpeg and Real-ESRGAN."))
     App(root)
     root.update_idletasks()
     root.geometry(f"+{max((root.winfo_screenwidth() - root.winfo_width()) // 2, 0)}+120")

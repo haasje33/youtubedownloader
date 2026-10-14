@@ -38,7 +38,7 @@ def bundled_bin_dir() -> Path | None:
 
 
 def find_executable(name: str) -> str | None:
-    env_override = os.environ.get(f"YTD_{name.upper()}")
+    env_override = os.environ.get("YTD_" + name.upper().replace("-", "_"))
     if env_override and os.access(env_override, os.X_OK):
         return env_override
 

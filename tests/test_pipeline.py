@@ -33,6 +33,7 @@ def media_server(tmp_path_factory):
     _ffmpeg(*src, "-c:v", "libvpx-vp9", "-b:v", "300k", "-an", str(root / "video.webm"))
     _ffmpeg(*src, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(root / "video.mp4"))
     _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac", str(root / "audio.m4a"))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:size=320x180", "-frames:v", "1", str(root / "thumb.jpg"))
 
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root))
     handler.log_message = lambda *a, **k: None
@@ -53,6 +54,8 @@ def _fake_info(base, root):
         "extractor": "generic",
         "extractor_key": "Generic",
         "webpage_url": "https://www.youtube.com/watch?v=fakeid12345",
+        "thumbnails": [{"id": "0", "url": f"{base}/thumb.jpg"}],
+        "uploader": "Test Channel",
         "formats": [
             {"format_id": "140", "url": f"{base}/audio.m4a", "ext": "m4a", "vcodec": "none",
              "acodec": "mp4a.40.2", "abr": 128, "protocol": "https", "filesize": size("audio.m4a")},
@@ -141,3 +144,24 @@ def test_cancel(fake_youtube, tmp_path):
         downloader.download("https://youtu.be/fakeid12345", 360, Mode.COMPATIBLE, tmp_path,
                             cancel_event=cancel)
     assert not list(tmp_path.iterdir())
+
+
+def test_mp3_download(fake_youtube, tmp_path):
+    events = []
+    path = downloader.download_audio("https://youtu.be/fakeid12345", tmp_path, on_progress=events.append)
+    assert path.suffix == ".mp3" and path.parent == tmp_path
+    out = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "stream=codec_name,codec_type:format_tags=title",
+         "-of", "json", str(path)], capture_output=True, text=True, check=True).stdout
+    data = json.loads(out)
+    codecs = {s["codec_name"] for s in data["streams"]}
+    assert "mp3" in codecs
+    assert "mjpeg" in codecs or "png" in codecs  # embedded cover art
+    assert data["format"]["tags"]["title"].startswith("Test")
+    assert [p.name for p in tmp_path.iterdir()] == [path.name]
+
+
+def test_download_with_upscale_skipped_when_already_large_enough(fake_youtube, tmp_path):
+    path = downloader.download("https://youtu.be/fakeid12345", 360, Mode.COMPATIBLE, tmp_path,
+                               upscale_to=None)
+    assert "AI upscaled" not in path.name

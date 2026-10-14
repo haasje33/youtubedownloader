@@ -59,6 +59,17 @@ jobs:
             "https://www.youtube.com/watch?v=jNQXAC9IVRw" -q 360 -o "$RUNNER_TEMP/downloads" -v
           ls -la "$RUNNER_TEMP/downloads"
 
+      - name: Try AI upscaling (best effort, CI machines may have no usable GPU)
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          APP="dist/YouTube Downloader.app/Contents"
+          "$APP/Frameworks/bin/ffmpeg" -loglevel error -y -f lavfi -i testsrc2=size=160x90:rate=10:duration=1 \
+            -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/tiny.mp4"
+          "$APP/MacOS/YouTube Downloader" --upscale-file "$RUNNER_TEMP/tiny.mp4" --upscale-to 1080 \
+            --content animation -o "$RUNNER_TEMP/upscaled" -v
+          ls -la "$RUNNER_TEMP/upscaled"
+
       - uses: actions/upload-artifact@v4
         with:
           name: YouTube-Downloader-macOS-${{ matrix.arch }}

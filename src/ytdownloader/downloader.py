@@ -15,8 +15,9 @@ from typing import Callable
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled
 
-from . import formats, tools
+from . import formats, tools, upscale
 from .formats import Mode, Selection
+from .upscale import Content
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class DownloadFailed(Exception):
 
 @dataclass
 class Progress:
-    stage: str  # "download", "merge", "convert", "finalize"
+    stage: str  # "download", "merge", "convert", "upscale", "finalize"
     fraction: float | None  # 0..1, or None when indeterminate
     detail: str = ""
 
@@ -174,6 +175,26 @@ def unique_path(path: Path) -> Path:
     raise DownloadFailed(f"Could not find a free file name for {path.name}")
 
 
+def _require_ffmpeg() -> None:
+    if not tools.discover().ffmpeg:
+        raise DownloadFailed(
+            "ffmpeg was not found. It is bundled with the app; when running from source, "
+            "install it with `brew install ffmpeg`."
+        )
+
+
+def _run_ytdlp(url: str, params: dict, cancel_event: threading.Event) -> dict:
+    try:
+        with yt_dlp.YoutubeDL(params) as ydl:
+            return ydl.extract_info(url, download=True)
+    except DownloadCancelled:
+        raise Cancelled() from None
+    except yt_dlp.utils.DownloadError as exc:
+        if cancel_event.is_set():
+            raise Cancelled() from None
+        raise DownloadFailed(friendly_error(exc)) from exc
+
+
 def download(
     url: str,
     tier: int,
@@ -182,16 +203,16 @@ def download(
     on_progress: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
     cookies_from_browser: str | None = None,
+    upscale_to: int | None = None,
+    upscale_content: Content = Content.REALISTIC,
 ) -> Path:
-    """Download `url` as an MP4 at (at most) `tier`p and return the final file path."""
+    """Download `url` as an MP4 at (at most) `tier`p and return the final file path.
+
+    With `upscale_to`, a video below that resolution is AI-upscaled afterwards.
+    """
     on_progress = on_progress or (lambda p: None)
     cancel_event = cancel_event or threading.Event()
-    toolset = tools.discover()
-    if not toolset.ffmpeg:
-        raise DownloadFailed(
-            "ffmpeg was not found. It is bundled with the app; when running from source, "
-            "install it with `brew install ffmpeg`."
-        )
+    _require_ffmpeg()
 
     output_dir = Path(output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,22 +252,19 @@ def download(
 
     try:
         on_progress(Progress("download", None, "Starting download…"))
-        try:
-            with yt_dlp.YoutubeDL(params) as ydl:
-                info = ydl.extract_info(url, download=True)
-        except DownloadCancelled:
-            raise Cancelled() from None
-        except yt_dlp.utils.DownloadError as exc:
-            if cancel_event.is_set():
-                raise Cancelled() from None
-            raise DownloadFailed(friendly_error(exc)) from exc
+        info = _run_ytdlp(url, params, cancel_event)
 
         downloaded = _downloaded_file(info, work_dir)
         selection = chosen.get("selection")
         tier_used = (selection.tier if selection else None) or tier
         title = Path(downloaded).stem
-        destination = unique_path(output_dir / f"{title} ({tier_used}p).mp4")
 
+        if upscale_to and tier_used < upscale_to:
+            destination = unique_path(output_dir / f"{title} ({upscale_to}p AI upscaled).mp4")
+            _upscale(downloaded, destination, upscale_to, upscale_content, on_progress, cancel_event)
+            return destination
+
+        destination = unique_path(output_dir / f"{title} ({tier_used}p).mp4")
         if mode is Mode.COMPATIBLE and selection and selection.needs_conversion:
             convert_to_hevc(
                 downloaded, destination,
@@ -263,6 +281,106 @@ def download(
         return destination
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def download_audio(
+    url: str,
+    output_dir: Path,
+    on_progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+    cookies_from_browser: str | None = None,
+) -> Path:
+    """Download only the audio as a high-quality MP3 with title and cover art."""
+    on_progress = on_progress or (lambda p: None)
+    cancel_event = cancel_event or threading.Event()
+    _require_ffmpeg()
+
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = Path(tempfile.mkdtemp(prefix="ytdownloader-"))
+    chosen: dict[str, Selection] = {}
+
+    def format_selector(ctx):
+        audio = formats.select_audio(ctx["formats"])
+        chosen["selection"] = Selection(video=audio, audio=None)
+        log.info("Selected audio %s (%s)", audio.get("format_id"), audio.get("acodec"))
+        yield audio
+
+    tracker = _DownloadTracker(on_progress, cancel_event, chosen, label="Downloading audio")
+
+    def postprocessor_hook(d):
+        if cancel_event.is_set():
+            raise Cancelled()
+        if d.get("status") == "started" and d.get("postprocessor") == "ExtractAudio":
+            on_progress(Progress("convert", None, "Converting to MP3…"))
+
+    params = base_params(cookies_from_browser) | {
+        "format": format_selector,
+        "paths": {"home": str(work_dir), "temp": str(work_dir)},
+        "outtmpl": {"default": "%(title).150B.%(ext)s"},
+        "writethumbnail": True,
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"},
+            {"key": "FFmpegMetadata", "add_metadata": True},
+            {"key": "EmbedThumbnail", "already_have_thumbnail": False},
+        ],
+        "progress_hooks": [tracker.hook],
+        "postprocessor_hooks": [postprocessor_hook],
+        "overwrites": True,
+    }
+
+    try:
+        on_progress(Progress("download", None, "Starting download…"))
+        info = _run_ytdlp(url, params, cancel_event)
+        mp3 = next((Path(d["filepath"]) for d in info.get("requested_downloads") or []
+                    if d.get("filepath", "").endswith(".mp3") and Path(d["filepath"]).exists()), None)
+        mp3 = mp3 or next(iter(work_dir.glob("*.mp3")), None)
+        if not mp3:
+            raise DownloadFailed("The MP3 file could not be created.")
+        destination = unique_path(output_dir / mp3.name)
+        shutil.move(str(mp3), destination)
+        return destination
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def upscale_file(
+    source: Path,
+    output_dir: Path,
+    target: int,
+    content: Content,
+    on_progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """AI-upscale a video file that is already on disk."""
+    on_progress = on_progress or (lambda p: None)
+    cancel_event = cancel_event or threading.Event()
+    _require_ffmpeg()
+    source = Path(source).expanduser()
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = unique_path(output_dir / f"{source.stem} ({target}p AI upscaled).mp4")
+    _upscale(source, destination, target, content, on_progress, cancel_event)
+    return destination
+
+
+def _upscale(source: Path, destination: Path, target: int, content: Content,
+             on_progress: ProgressCallback, cancel_event: threading.Event) -> None:
+    ffmpeg = tools.discover().ffmpeg
+    encoders = encoder_attempts(tools.ffmpeg_encoders(ffmpeg), target, None) if ffmpeg else []
+    if not encoders:
+        raise DownloadFailed("This ffmpeg build has no H.264/HEVC encoder.")
+    try:
+        upscale.upscale_video(
+            source, destination, target, content,
+            video_encoder_args=encoders[0],
+            on_progress=lambda fraction, detail: on_progress(Progress("upscale", fraction, detail)),
+            cancel_event=cancel_event,
+        )
+    except upscale.UpscaleCancelled:
+        raise Cancelled() from None
+    except upscale.UpscaleError as exc:
+        raise DownloadFailed(str(exc)) from exc
 
 
 def _downloaded_file(info: dict, work_dir: Path) -> Path:
@@ -285,8 +403,9 @@ class _DownloadTracker:
     """Turns yt-dlp's per-stream progress into one overall percentage."""
 
     def __init__(self, on_progress: ProgressCallback, cancel_event: threading.Event,
-                 chosen: dict[str, Selection]):
+                 chosen: dict[str, Selection], label: str = "Downloading"):
         self.on_progress = on_progress
+        self.label = label
         self.cancel_event = cancel_event
         self.chosen = chosen
         self.done: dict[str, float] = {}  # format_id -> weight already completed
@@ -338,7 +457,7 @@ class _DownloadTracker:
             is_audio = format_id == str(selection.audio.get("format_id"))
             label = "Downloading audio" if is_audio else "Downloading video"
         else:
-            label = "Downloading"
+            label = self.label
         self.on_progress(Progress("download", overall, f"{label} — " + " · ".join(pieces)))
 
 

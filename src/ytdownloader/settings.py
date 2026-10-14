@@ -34,8 +34,8 @@ def default_download_dir() -> Path:
 class Settings:
     output_dir: str = ""
     mode: str = "compatible"
-    quality: int = 2160
     cookies_from_browser: str = ""
+    upscale_content: str = "realistic"
 
     @classmethod
     def load(cls) -> "Settings":

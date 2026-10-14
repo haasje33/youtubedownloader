@@ -134,3 +134,20 @@ def test_merged_format_dict():
 def test_tier_label():
     assert formats.tier_label(2160) == "2160p (4K)"
     assert formats.tier_label(480) == "480p"
+
+
+def test_select_audio_prefers_highest_bitrate_original_track():
+    assert formats.select_audio(YOUTUBE)["format_id"] == "251"
+    dubbed = [aud("251-dub", "opus", "webm", 160, language_preference=-1),
+              aud("140-orig", "mp4a.40.2", "m4a", 129, language_preference=10)]
+    assert formats.select_audio(dubbed)["format_id"] == "140-orig"
+
+
+def test_select_audio_falls_back_to_smallest_combined_file():
+    fmts = [
+        {"format_id": "hd", "width": 1280, "height": 720, "vcodec": "avc1", "acodec": "mp4a", "abr": 128},
+        {"format_id": "sd", "width": 640, "height": 360, "vcodec": "avc1", "acodec": "mp4a", "abr": 128},
+    ]
+    assert formats.select_audio(fmts)["format_id"] == "sd"
+    with pytest.raises(formats.NoSuitableFormat):
+        formats.select_audio([vid("137", 1920, 1080, "avc1")])

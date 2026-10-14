@@ -12,11 +12,15 @@ with open(os.path.join(ROOT, "src", "ytdownloader", "__init__.py")) as fh:
     VERSION = re.search(r'__version__ = "([^"]+)"', fh.read()).group(1)
 
 binaries = []
-for tool in ("ffmpeg", "ffprobe", "deno"):
+for tool in ("ffmpeg", "ffprobe", "deno", "realesrgan-ncnn-vulkan"):
     path = os.path.join(ROOT, "vendor", "bin", tool)
     if not os.path.exists(path):
         raise SystemExit(f"Missing {path}. Run scripts/fetch_tools.sh first.")
     binaries.append((path, "bin"))
+
+models = os.path.join(ROOT, "vendor", "realesrgan-models")
+if not os.path.isdir(models):
+    raise SystemExit(f"Missing {models}. Run scripts/fetch_tools.sh first.")
 
 icon = os.path.join(ROOT, "build", "icon", "AppIcon.icns")
 
@@ -24,7 +28,7 @@ a = Analysis(
     [os.path.join(ROOT, "packaging", "app_main.py")],
     pathex=[os.path.join(ROOT, "src")],
     binaries=binaries,
-    datas=collect_data_files("yt_dlp_ejs"),
+    datas=collect_data_files("yt_dlp_ejs") + [(models, "realesrgan-models")],
     hiddenimports=["yt_dlp_ejs"],
     excludes=["pytest", "PIL"],
     noarchive=False,

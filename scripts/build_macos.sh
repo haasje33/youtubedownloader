@@ -22,8 +22,8 @@ fi
 "$PYTHON" -c 'import tkinter; print("Tk", tkinter.Tcl().eval("info patchlevel"))'
 "$PYTHON" -m pip install --upgrade -r requirements-build.txt
 
-for tool in ffmpeg ffprobe deno; do
-  if [ ! -x "vendor/bin/$tool" ]; then
+for tool in ffmpeg ffprobe deno realesrgan-ncnn-vulkan; do
+  if [ ! -x "vendor/bin/$tool" ] || [ ! -d vendor/realesrgan-models ]; then
     scripts/fetch_tools.sh "$ARCH"
     break
   fi
