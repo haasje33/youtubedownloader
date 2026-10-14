@@ -1,0 +1,7 @@
+-r requirements.txt
+pyinstaller>=6.10
+pillow>=10
+numpy>=1.26
+onnx>=1.17            # scripts/convert_to_onnx.py
+# ONNX Runtime with CUDA 13 + cuDNN 9 from NVIDIA's pip packages (bundled into the app)
+onnxruntime-gpu[cuda,cudnn]>=1.31

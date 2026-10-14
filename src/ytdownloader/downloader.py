@@ -266,7 +266,7 @@ def download(
 
         destination = unique_path(output_dir / f"{title} ({tier_used}p).mp4")
         if mode is Mode.COMPATIBLE and selection and selection.needs_conversion:
-            convert_to_hevc(
+            convert_for_compatibility(
                 downloaded, destination,
                 duration=info.get("duration"),
                 tier=tier_used,
@@ -366,8 +366,7 @@ def upscale_file(
 
 def _upscale(source: Path, destination: Path, target: int, content: Content,
              on_progress: ProgressCallback, cancel_event: threading.Event) -> None:
-    ffmpeg = tools.discover().ffmpeg
-    encoders = encoder_attempts(tools.ffmpeg_encoders(ffmpeg), target, None) if ffmpeg else []
+    encoders = working_encoder_attempts(target, None)
     if not encoders:
         raise DownloadFailed("This ffmpeg build has no H.264/HEVC encoder.")
     try:
@@ -473,27 +472,46 @@ def hevc_bitrate_kbps(tier: int, fps: float | None) -> int:
     return kbps
 
 
-def encoder_attempts(available: frozenset[str], tier: int, fps: float | None) -> list[list[str]]:
-    """Video encoder argument lists to try, most preferred first."""
-    attempts = []
-    if "hevc_videotoolbox" in available:
-        kbps = hevc_bitrate_kbps(tier, fps)
-        attempts.append([
-            "-c:v", "hevc_videotoolbox", "-b:v", f"{kbps}k",
-            "-maxrate", f"{int(kbps * 1.5)}k", "-bufsize", f"{kbps * 2}k",
-            "-allow_sw", "1", "-tag:v", "hvc1",
-        ])
-    if "libx265" in available:
-        attempts.append(["-c:v", "libx265", "-preset", "fast", "-crf", "22", "-tag:v", "hvc1"])
-    if "libx264" in available:
-        attempts.append(["-c:v", "libx264", "-preset", "fast", "-crf", "20"])
-    if "h264_videotoolbox" in available:
-        kbps = hevc_bitrate_kbps(tier, fps) * 3 // 2
-        attempts.append(["-c:v", "h264_videotoolbox", "-b:v", f"{kbps}k", "-allow_sw", "1"])
-    return attempts
+def encoder_attempts(available: frozenset[str], tier: int, fps: float | None,
+                     codec: str | None = None) -> list[list[str]]:
+    """Video encoder argument lists to try, most preferred first.
+
+    Hardware encoders come first (Apple VideoToolbox, NVIDIA NVENC, Intel Quick Sync,
+    AMD AMF); software x265/x264 are the fallback.
+    """
+    codec = codec or formats.target_codec()
+    kbps = hevc_bitrate_kbps(tier, fps)
+    h264_kbps = kbps * 3 // 2
+    hevc = [
+        ("hevc_videotoolbox", ["-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.5)}k",
+                               "-bufsize", f"{kbps * 2}k", "-allow_sw", "1", "-tag:v", "hvc1"]),
+        ("hevc_nvenc", ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "21",
+                        "-b:v", f"{kbps}k", "-maxrate", f"{kbps * 2}k", "-tag:v", "hvc1"]),
+        ("libx265", ["-preset", "fast", "-crf", "22", "-tag:v", "hvc1"]),
+    ]
+    h264 = [
+        ("h264_nvenc", ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "19",
+                        "-b:v", f"{h264_kbps}k", "-maxrate", f"{h264_kbps * 2}k", "-profile:v", "high"]),
+        ("h264_qsv", ["-global_quality", "21", "-look_ahead", "1"]),
+        ("h264_amf", ["-quality", "quality", "-rc", "qvbr", "-qvbr_quality_level", "21"]),
+        ("libx264", ["-preset", "fast", "-crf", "20"]),
+        ("h264_videotoolbox", ["-b:v", f"{h264_kbps}k", "-allow_sw", "1"]),
+    ]
+    ordered = hevc + h264 if codec == "hevc" else h264
+    return [["-c:v", name, *args] for name, args in ordered if name in available]
 
 
-def convert_to_hevc(
+def working_encoder_attempts(tier: int, fps: float | None, codec: str | None = None) -> list[list[str]]:
+    """Like encoder_attempts, minus hardware encoders this computer can't use
+    (e.g. NVENC compiled into ffmpeg on a PC without an NVIDIA GPU)."""
+    ffmpeg = tools.discover().ffmpeg
+    if not ffmpeg:
+        return []
+    return [args for args in encoder_attempts(tools.ffmpeg_encoders(ffmpeg), tier, fps, codec)
+            if tools.encoder_works(ffmpeg, args)]
+
+
+def convert_for_compatibility(
     source: Path,
     destination: Path,
     duration: float | None,
@@ -503,14 +521,16 @@ def convert_to_hevc(
     on_progress: ProgressCallback,
     cancel_event: threading.Event,
 ) -> None:
-    """Re-encode `source` to an MP4 that plays natively on Apple devices."""
+    """Re-encode `source` to an MP4 that plays in the system's own video player
+    (HEVC for QuickTime on a Mac, H.264 on Windows)."""
     ffmpeg = tools.discover().ffmpeg
     if not ffmpeg:
         raise DownloadFailed("ffmpeg is required for conversion but was not found.")
-    attempts = encoder_attempts(tools.ffmpeg_encoders(ffmpeg), tier, fps)
+    attempts = working_encoder_attempts(tier, fps)
     if not attempts:
         raise DownloadFailed("This ffmpeg build has no H.264/HEVC encoder.")
 
+    label = f"Converting to {formats.target_codec_label()}"
     audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "192k"]
     errors = []
     for video_args in attempts:
@@ -527,8 +547,8 @@ def convert_to_hevc(
             str(partial),
         ]
         log.info("Converting with %s: %s", encoder, " ".join(cmd))
-        on_progress(Progress("convert", 0.0, "Converting for QuickTime compatibility…"))
-        ok, error = _run_ffmpeg(cmd, duration, on_progress, cancel_event)
+        on_progress(Progress("convert", 0.0, f"{label}…"))
+        ok, error = _run_ffmpeg(cmd, duration, on_progress, cancel_event, label)
         if ok:
             partial.replace(destination)
             return
@@ -541,9 +561,10 @@ def convert_to_hevc(
 
 
 def _run_ffmpeg(cmd: list[str], duration: float | None, on_progress: ProgressCallback,
-                cancel_event: threading.Event) -> tuple[bool, str]:
+                cancel_event: threading.Event, label: str = "Converting") -> tuple[bool, str]:
     with tempfile.TemporaryFile(mode="w+") as stderr:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, text=True,
+                                **tools.no_window())
         speed = None
         try:
             assert proc.stdout is not None
@@ -563,7 +584,7 @@ def _run_ffmpeg(cmd: list[str], duration: float | None, on_progress: ProgressCal
                     except ValueError:
                         continue
                     fraction = max(0.0, min(seconds / duration, 1.0))
-                    detail = f"Converting for QuickTime — {fraction * 100:.0f}%"
+                    detail = f"{label} — {fraction * 100:.0f}%"
                     if speed:
                         remaining = (duration - seconds) / speed
                         detail += f" · {speed:.1f}× · {format_duration(remaining)} left"

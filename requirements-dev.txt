@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8
+numpy>=1.26
+onnx>=1.17
+onnxruntime>=1.20

@@ -6,6 +6,7 @@ be unit tested without touching the network.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from enum import Enum
 
@@ -26,11 +27,21 @@ class Mode(str, Enum):
     """How the video stream should end up inside the MP4."""
 
     # H.264 where YouTube offers it (up to 1080p), otherwise the best stream is
-    # converted to HEVC so it plays in QuickTime, Photos, iMovie, iOS, etc.
+    # converted so it plays in the system player: HEVC for QuickTime on a Mac,
+    # H.264 on Windows (HEVC playback needs a paid extension there).
     COMPATIBLE = "compatible"
     # Keep YouTube's original stream (usually AV1 or VP9 above 1080p). Fastest
     # and lossless, but QuickTime may not play VP9.
     ORIGINAL = "original"
+
+
+def target_codec(platform: str | None = None) -> str:
+    """Codec used when converting or upscaling."""
+    return "h264" if (platform or sys.platform) == "win32" else "hevc"
+
+
+def target_codec_label(platform: str | None = None) -> str:
+    return {"h264": "H.264", "hevc": "HEVC"}[target_codec(platform)]
 
 
 def tier_label(tier: int) -> str:
@@ -104,6 +115,13 @@ def video_codec_family(vcodec: str | None) -> str:
 
 def is_apple_compatible(vcodec: str | None) -> bool:
     return video_codec_family(vcodec) in ("h264", "hevc")
+
+
+def is_compatible(vcodec: str | None, platform: str | None = None) -> bool:
+    """Plays in the system's own player without extra codecs."""
+    if (platform or sys.platform) == "win32":
+        return video_codec_family(vcodec) == "h264"
+    return is_apple_compatible(vcodec)
 
 
 # Higher is better.
@@ -185,7 +203,7 @@ class Selection:
     @property
     def needs_conversion(self) -> bool:
         """True if the result must be re-encoded for Mode.COMPATIBLE."""
-        return not is_apple_compatible(self.video.get("vcodec"))
+        return not is_compatible(self.video.get("vcodec"))
 
     @property
     def estimated_size(self) -> int | None:

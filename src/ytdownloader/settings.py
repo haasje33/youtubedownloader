@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -16,12 +17,16 @@ log = logging.getLogger(__name__)
 def support_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / APP_NAME
     return Path.home() / ".config" / "youtube-downloader"
 
 
 def log_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Logs" / APP_NAME
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / APP_NAME / "Logs"
     return support_dir() / "logs"
 
 

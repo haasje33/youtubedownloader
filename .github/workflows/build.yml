@@ -1,4 +1,4 @@
-name: Build macOS app
+name: Build apps
 
 on:
   push:
@@ -83,9 +83,63 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build app and installer
+        run: python scripts/build_windows.py
+
+      - name: Check the window opens
+        run: |
+          $env:YTD_SMOKE_TEST = "1"
+          $p = Start-Process -FilePath "dist\YouTube Downloader\YouTube Downloader.exe" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "GUI exited with $($p.ExitCode)" }
+
+      - name: Upscale with the bundled ONNX engine (on the CPU; CI has no NVIDIA GPU)
+        run: |
+          $cli = "dist\YouTube Downloader\youtube-downloader-cli.exe"
+          & "dist\YouTube Downloader\_internal\bin\ffmpeg.exe" -loglevel error -y -f lavfi `
+            -i testsrc2=size=160x90:rate=10:duration=0.5 -c:v libx264 -pix_fmt yuv420p "$env:RUNNER_TEMP\tiny.mp4"
+          $env:YTD_UPSCALE_ENGINE = "onnx-cpu"
+          & $cli --upscale-file "$env:RUNNER_TEMP\tiny.mp4" --upscale-to 1080 --content fast -o "$env:RUNNER_TEMP\up" -v
+          if ($LASTEXITCODE -ne 0) { throw "ONNX upscale failed" }
+          Get-ChildItem "$env:RUNNER_TEMP\up"
+
+      - name: Try the Vulkan engine (best effort, no GPU on CI)
+        continue-on-error: true
+        run: |
+          $env:YTD_UPSCALE_ENGINE = "ncnn"
+          & "dist\YouTube Downloader\youtube-downloader-cli.exe" --upscale-file "$env:RUNNER_TEMP\tiny.mp4" `
+            --upscale-to 1080 --content fast -o "$env:RUNNER_TEMP\up" -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Downloader-Windows-x64
+          path: |
+            dist/*Setup.exe
+            dist/*Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -94,5 +148,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.dmg
+          files: |
+            artifacts/*.dmg
+            artifacts/*Setup.exe
+            artifacts/*Windows-x64.zip
           generate_release_notes: true

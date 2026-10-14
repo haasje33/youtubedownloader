@@ -21,6 +21,7 @@ import queue
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -108,11 +109,42 @@ def upscaler_paths() -> tuple[str, Path] | None:
     return None
 
 
+def preferred_engine() -> str:
+    """"cuda" (NVIDIA, Windows), "ncnn" (Real-ESRGAN on Vulkan/Metal) or "onnx-cpu" (tests)."""
+    forced = os.environ.get("YTD_UPSCALE_ENGINE")
+    if forced in ("ncnn", "cuda", "onnx-cpu"):
+        return forced
+    if tools.IS_WINDOWS:
+        from . import onnx_engine
+
+        if onnx_engine.cuda_status().available:
+            return "cuda"
+    return "ncnn"
+
+
+def engine_description() -> str:
+    """Human-readable name of the engine that will be used (may take a second on Windows)."""
+    engine = preferred_engine()
+    if engine in ("cuda", "onnx-cpu"):
+        from . import onnx_engine
+
+        return onnx_engine.cuda_status().detail
+    if upscaler_paths() is None:
+        return "not available"
+    return "Real-ESRGAN on the GPU (Metal)" if sys.platform == "darwin" else "Real-ESRGAN on the GPU (Vulkan)"
+
+
 def is_available() -> bool:
-    return upscaler_paths() is not None
+    if upscaler_paths() is not None:
+        return True
+    if tools.IS_WINDOWS or os.environ.get("YTD_UPSCALE_ENGINE") == "onnx-cpu":
+        from . import onnx_engine
+
+        return onnx_engine.models_dir() is not None
+    return False
 
 
-def plan(width: int, height: int, target: int, content: Content) -> Plan:
+def plan(width: int, height: int, target: int, content: Content, engine: str = "ncnn") -> Plan:
     """Choose the model/scale and the final size for upscaling to `target`p."""
     short_side = min(width, height)
     if short_side >= target:
@@ -123,6 +155,14 @@ def plan(width: int, height: int, target: int, content: Content) -> Plan:
         return max(2, int(round(value / 2)) * 2)
 
     out_w, out_h = even(width * factor), even(height * factor)
+    if engine != "ncnn":  # ONNX models: x4 versions, plus a native x2 model for real-life video
+        if content is Content.ANIMATION:
+            return Plan("realesr-animevideov3", 4, out_w, out_h)
+        if content is Content.FAST:
+            return Plan("realesr-general-x4v3", 4, out_w, out_h)
+        if factor <= 2:
+            return Plan("realesrgan-x2plus", 2, out_w, out_h)
+        return Plan("realesrgan-x4plus", 4, out_w, out_h)
     if content is Content.ANIMATION:
         scale = min(4, max(2, math.ceil(factor - 0.01)))
         return Plan("realesr-animevideov3", scale, out_w, out_h)
@@ -149,7 +189,7 @@ def probe(path: Path) -> VideoProbe:
         [ffprobe, "-v", "error", "-show_entries",
          "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate:format=duration",
          "-of", "json", str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, **tools.no_window(),
     )
     if out.returncode != 0:
         raise UpscaleError(f"Could not read the video: {out.stderr.strip() or out.returncode}")
@@ -303,6 +343,24 @@ def upscale_video(
     cancel_event: threading.Event,
 ) -> None:
     """Upscale `source` to `target`p and write an MP4 to `destination`."""
+    engine = preferred_engine()
+    info = probe(source)
+    p = plan(info.width, info.height, target, content, engine)
+    if engine in ("cuda", "onnx-cpu"):
+        from . import onnx_engine
+
+        try:
+            onnx_engine.upscale_video(source, destination, info, p, video_encoder_args, on_progress,
+                                      cancel_event, use_cuda=engine == "cuda")
+        except onnx_engine.UpscaleCancelled:
+            raise UpscaleCancelled() from None
+        return
+    _upscale_video_ncnn(source, destination, info, p, video_encoder_args, on_progress, cancel_event)
+
+
+def _upscale_video_ncnn(source: Path, destination: Path, info: VideoProbe, p: Plan,
+                        video_encoder_args: list[str], on_progress: ProgressFn,
+                        cancel_event: threading.Event) -> None:
     paths = upscaler_paths()
     if not paths:
         raise UpscaleError("The AI upscaler (Real-ESRGAN) is not installed.")
@@ -310,9 +368,6 @@ def upscale_video(
     ffmpeg = tools.discover().ffmpeg
     if not ffmpeg:
         raise UpscaleError("ffmpeg was not found.")
-
-    info = probe(source)
-    p = plan(info.width, info.height, target, content)
     if not (models / f"{p.model}.param").exists() and not (models / f"{p.model}-x{p.scale}.param").exists():
         raise UpscaleError(f"The AI model {p.model} is missing from this build.")
     total = info.estimated_frames
@@ -333,7 +388,7 @@ def upscale_video(
         [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(source),
          "-map", "0:v:0", "-vf", f"fps={info.frame_rate}",
          "-f", "image2pipe", "-c:v", "png", "-compression_level", "1", "-pix_fmt", "rgb24", "-"],
-        stdout=subprocess.PIPE, stderr=decoder_err,
+        stdout=subprocess.PIPE, stderr=decoder_err, **tools.no_window(),
     )
     encoder = subprocess.Popen(
         [ffmpeg, "-hide_banner", "-y", "-loglevel", "error",
@@ -343,7 +398,7 @@ def upscale_video(
          "-vf", f"scale={p.out_width}:{p.out_height}:flags=lanczos,format=yuv420p",
          *video_encoder_args, *audio_args,
          "-movflags", "+faststart", str(partial)],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=encoder_err,
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=encoder_err, **tools.no_window(),
     )
     processes: list[subprocess.Popen] = [decoder, encoder]
     stop = threading.Event()
@@ -410,6 +465,7 @@ def upscale_video(
                     [exe, "-i", str(chunk_dir), "-o", str(out_dir), "-n", p.model, "-s", str(p.scale),
                      "-m", str(models), "-f", "png", *realesrgan_tuning(p.model)],
                     stdout=subprocess.DEVNULL, stderr=esrgan_err, cwd=str(models.parent),
+                    **tools.no_window(),
                 )
                 processes.append(esrgan)
 

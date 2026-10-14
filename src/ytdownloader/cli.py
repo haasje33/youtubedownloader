@@ -70,11 +70,38 @@ def self_test() -> int:
     else:
         print("realesrgan: MISSING")
         ok = False
+    if tools.IS_WINDOWS:
+        from . import onnx_engine
+
+        directory = onnx_engine.models_dir()
+        print(f"onnx models: {directory or 'MISSING'}")
+        if directory is None:
+            ok = False
+        else:
+            for name, filename in onnx_engine.MODEL_FILES.items():
+                if not (directory / filename).exists():
+                    print(f"    model {name}: MISSING")
+                    ok = False
+        try:
+            import onnxruntime
+
+            print(f"onnxruntime {onnxruntime.__version__}: {', '.join(onnxruntime.get_available_providers())}")
+            if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+                ok = False
+        except ImportError:
+            print("onnxruntime: MISSING")
+            ok = False
+        # Informational: CI machines have no NVIDIA GPU.
+        status = onnx_engine.cuda_status()
+        print(f"NVIDIA engine: {'ready' if status.available else 'not available'} — {status.detail}")
     if toolset.ffmpeg:
         encoders = tools.ffmpeg_encoders(toolset.ffmpeg)
-        wanted = ["hevc_videotoolbox", "h264_videotoolbox", "libx265", "libx264", "aac"]
+        wanted = ["hevc_videotoolbox", "h264_videotoolbox", "h264_nvenc", "hevc_nvenc",
+                  "libx265", "libx264", "aac"]
         print("encoders: " + ", ".join(f"{e}={'yes' if e in encoders else 'no'}" for e in wanted))
-        if not ({"hevc_videotoolbox", "libx265", "libx264"} & encoders):
+        usable = downloader.working_encoder_attempts(1080, 30)
+        print("usable on this computer: " + (", ".join(a[1] for a in usable) or "none"))
+        if not usable:
             ok = False
     print("self-test: " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1

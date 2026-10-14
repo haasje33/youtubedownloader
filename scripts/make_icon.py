@@ -2,8 +2,8 @@
 
     python scripts/make_icon.py OUTPUT_DIR
 
-Writes OUTPUT_DIR/AppIcon.png (1024px) and, when `iconutil` is available,
-OUTPUT_DIR/AppIcon.icns.
+Writes OUTPUT_DIR/AppIcon.png (1024px), OUTPUT_DIR/AppIcon.ico (Windows) and,
+when `iconutil` is available (macOS), OUTPUT_DIR/AppIcon.icns.
 """
 
 from __future__ import annotations
@@ -68,6 +68,8 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     icon = draw_icon()
     icon.save(out / "AppIcon.png")
+    # Windows .ico with the usual sizes (also used on other platforms for convenience).
+    icon.save(out / "AppIcon.ico", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
 
     if not shutil.which("iconutil"):
         print(f"Wrote {out / 'AppIcon.png'} (iconutil not available, skipping .icns)")

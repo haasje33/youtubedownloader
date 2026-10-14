@@ -23,18 +23,37 @@ log = logging.getLogger(__name__)
 
 URL_HINT = re.compile(r"^https?://(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/", re.I)
 
-MODE_TEXT = {
-    Mode.COMPATIBLE: (
-        "Most compatible (H.264 / HEVC)",
-        "Plays in QuickTime, Photos, iMovie and on iPhone. 1440p and 4K are converted "
-        "to HEVC after downloading, which takes extra time.",
-    ),
-    Mode.ORIGINAL: (
-        "Original stream (AV1 / VP9)",
-        "Fastest, no conversion. 1440p and 4K use AV1 or VP9; if QuickTime won't play "
-        "the file, use VLC or IINA.",
-    ),
-}
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+if IS_WINDOWS:
+    MODE_TEXT = {
+        Mode.COMPATIBLE: (
+            "Most compatible (H.264)",
+            "Plays in the Windows Media Player and Photos apps, in video editors and on phones. "
+            "1440p and 4K are converted to H.264 after downloading (on the graphics card when possible).",
+        ),
+        Mode.ORIGINAL: (
+            "Original stream (AV1 / VP9)",
+            "Fastest, no conversion. Plays in Windows 11 and VLC; some older editors and TVs "
+            "can't open AV1 or VP9.",
+        ),
+    }
+    REVEAL_TEXT = "Show in Explorer"
+else:
+    MODE_TEXT = {
+        Mode.COMPATIBLE: (
+            "Most compatible (H.264 / HEVC)",
+            "Plays in QuickTime, Photos, iMovie and on iPhone. 1440p and 4K are converted "
+            "to HEVC after downloading, which takes extra time.",
+        ),
+        Mode.ORIGINAL: (
+            "Original stream (AV1 / VP9)",
+            "Fastest, no conversion. 1440p and 4K use AV1 or VP9; if QuickTime won't play "
+            "the file, use VLC or IINA.",
+        ),
+    }
+    REVEAL_TEXT = "Show in Finder" if IS_MAC else "Show in Folder"
 BROWSERS = ["None"] + [b.capitalize() for b in downloader.SUPPORTED_BROWSERS]
 
 AUDIO_ONLY = 0  # quality-list value meaning "MP3 audio only"
@@ -67,6 +86,10 @@ class App:
         self._build()
         self._set_state("idle")
         self._prefill_from_clipboard()
+        if IS_WINDOWS and self.upscaler_available:
+            # Finding the GPU and starting CUDA takes a moment; don't block the window.
+            threading.Thread(target=lambda: self.events.put(("engine", upscale.engine_description())),
+                             daemon=True).start()
         self._warn_missing_tools()
         root.after(100, self._poll_events)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -161,7 +184,8 @@ class App:
         self.content_box = ttk.Combobox(upscale_row, textvariable=self.content_var, state="readonly",
                                         values=list(CONTENT_LABELS), width=22)
         self.content_box.grid(row=0, column=2, padx=(8, 0))
-        upscale_hint = ("Uses Real-ESRGAN AI on your Mac's GPU to add detail to low-resolution videos. "
+        upscale_hint = (self._windows_upscale_hint("Checking your graphics card…") if IS_WINDOWS else
+                        "Uses Real-ESRGAN AI on your Mac's GPU to add detail to low-resolution videos. "
                         "On an M1: \u201cbest quality\u201d does about 0.3 frames/s (hours for a few "
                         "minutes of video), \u201cfast\u201d about 6 frames/s with a little less fine detail, "
                         "animation about 12 frames/s."
@@ -213,7 +237,7 @@ class App:
         self.upscale_file_button.grid(row=0, column=0, sticky="w")
         buttons = ttk.Frame(bottom)
         buttons.grid(row=0, column=2, sticky="e")
-        self.reveal_button = ttk.Button(buttons, text="Show in Finder", command=self.reveal)
+        self.reveal_button = ttk.Button(buttons, text=REVEAL_TEXT, command=self.reveal)
         self.reveal_button.grid(row=0, column=0, padx=(0, 8))
         self.cancel_button = ttk.Button(buttons, text="Cancel", command=self.cancel)
         self.cancel_button.grid(row=0, column=1, padx=(0, 8))
@@ -268,6 +292,13 @@ class App:
         if URL_HINT.match(text) and len(text) < 500:
             self.url_var.set(text)
         self.url_entry.focus_set()
+
+    def _windows_upscale_hint(self, engine: str) -> str:
+        return ("Uses Real-ESRGAN AI to add detail to low-resolution videos. AI engine: " + engine
+                + ". \u201cBest quality\u201d gives the most detail, \u201cfast\u201d is much quicker.")
+
+    def _on_engine(self, description: str) -> None:
+        self.upscale_hint.configure(text=self._windows_upscale_hint(description))
 
     def _warn_missing_tools(self) -> None:
         missing = tools.discover().missing
@@ -376,7 +407,10 @@ class App:
 
     def _keep_awake(self, on: bool) -> None:
         """Stop the Mac from sleeping during long downloads and upscales."""
-        if on and sys.platform == "darwin" and self.caffeinate is None:
+        if IS_WINDOWS:
+            _windows_keep_awake(on)
+            return
+        if on and IS_MAC and self.caffeinate is None:
             try:
                 self.caffeinate = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
             except OSError:
@@ -400,7 +434,9 @@ class App:
     def reveal(self) -> None:
         if not self.last_file:
             return
-        if sys.platform == "darwin":
+        if IS_WINDOWS:
+            subprocess.run(["explorer", "/select,", str(self.last_file)], check=False)
+        elif IS_MAC:
             subprocess.run(["open", "-R", str(self.last_file)], check=False)
         else:
             subprocess.run(["xdg-open", str(self.last_file.parent)], check=False)
@@ -534,8 +570,36 @@ class App:
         messagebox.showerror(APP_NAME, message)
 
 
+def _windows_keep_awake(on: bool) -> None:
+    import ctypes
+
+    es_continuous, es_system_required = 0x80000000, 0x00000001
+    flags = es_continuous | es_system_required if on else es_continuous
+    ctypes.windll.kernel32.SetThreadExecutionState(flags)
+
+
+def _windows_setup() -> None:
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on high-DPI screens
+    except (AttributeError, OSError):
+        pass
+    try:
+        # Own taskbar icon/grouping instead of Python's.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YouTubeDownloader.App")
+    except (AttributeError, OSError):
+        pass
+
+
 def run() -> None:
+    if IS_WINDOWS:
+        _windows_setup()
     root = tk.Tk()
+    if IS_WINDOWS:
+        icon = Path(getattr(sys, "_MEIPASS", "")) / "AppIcon.ico"
+        if icon.exists():
+            root.iconbitmap(default=str(icon))
     root.title(APP_NAME)
     if sys.platform == "darwin":
         # Standard "About" item in the application menu.

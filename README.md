@@ -1,6 +1,6 @@
-# YouTube Downloader for macOS
+# YouTube Downloader for macOS and Windows
 
-A small Mac app that downloads YouTube videos as **MP4** in any quality YouTube offers, from 144p up to **4K (2160p)**, or as **MP3** audio. It can also **upscale low-resolution videos with AI**.
+A small app for Mac and Windows that downloads YouTube videos as **MP4** in any quality YouTube offers, from 144p up to **4K (2160p)**, or as **MP3** audio. It can also **upscale low-resolution videos with AI**.
 
 - Paste a link, click **Get Video Info**, pick a quality, click **Download**.
 - The highest available quality is selected by default. Only the qualities that exist for that video are listed, with the estimated download size.
@@ -28,14 +28,54 @@ A small Mac app that downloads YouTube videos as **MP4** in any quality YouTube 
   - The app shows frames per second and time left from the first frame on, and keeps the Mac awake meanwhile.
   - Repeated identical frames, such as still images, are upscaled once and reused.
   - The model upscales 4×. From 360p it really adds detail up to 1440p; going to 4K enlarges that result further.
-  - There is no NVIDIA option: Macs don't have NVIDIA graphics, and NVIDIA's own upscaler only runs on Windows.
+  - On Windows, see [AI upscaling on Windows](#ai-upscaling-on-windows).
 - Optional "Use cookies from" setting (Safari, Chrome, Firefox and others) for age-restricted videos, or when YouTube asks you to sign in.
 
 Everything it needs is inside the app: [yt-dlp](https://github.com/yt-dlp/yt-dlp) for downloading, ffmpeg for merging and converting, Real-ESRGAN (BSD-3-Clause) for AI upscaling, and Deno, which yt-dlp needs to solve YouTube's JavaScript challenges. Without Deno, the high-resolution formats go missing.
 
 > Only download videos you have the right to download (for example your own uploads, or videos under a license that allows it). Respect YouTube's Terms of Service and copyright law.
 
-## Installing
+## Windows
+
+The Windows app has the same features, with Windows-specific video handling and its own AI upscaling engine.
+
+- **Most compatible** converts 1440p/4K to **H.264**, which plays in every Windows player and editor. HEVC would need a paid extension on Windows.
+  - Conversions and upscaled videos are encoded on the graphics card when possible: NVIDIA NVENC, Intel Quick Sync or AMD AMF, with software x264 as the fallback.
+- Settings are stored in `%APPDATA%\YouTube Downloader`, logs in `%LOCALAPPDATA%\YouTube Downloader\Logs`.
+
+### AI upscaling on Windows
+
+With an **NVIDIA GeForce RTX** card, the app upscales with ONNX Runtime on **CUDA + cuDNN**.
+- The Real-ESRGAN models run in float16 on the tensor cores.
+- Frames go straight from the decoder to the GPU and on to the NVENC encoder, without temporary files.
+- The upscale hint in the app shows which engine is in use, for example *"NVIDIA GeForce RTX 4070 Ti SUPER (CUDA, tensor cores)"*.
+
+Windows-specific models (ONNX, converted from the official Real-ESRGAN checkpoints by `scripts/convert_to_onnx.py`):
+
+| Model | Used for |
+|---|---|
+| `realesrgan-x4plus` | Real-life · best quality, enlarging more than 2× |
+| `realesrgan-x2plus` | Real-life · best quality, enlarging up to 2× (for example 720p → 1440p, 1080p → 4K): a native 2× model, sharper and about 4× less work than 4× followed by shrinking |
+| `realesr-general-x4v3` | Real-life · fast |
+| `realesr-animevideov3` | Animation / cartoons |
+
+Requirements and fallbacks:
+- The NVIDIA engine needs an RTX 20-series or newer card and **NVIDIA driver 580 or newer** (CUDA 13).
+- On other graphics cards (AMD, Intel), or when CUDA is unavailable, the app uses Real-ESRGAN on Vulkan, like the Mac version.
+- The CUDA and cuDNN libraries make the Windows download large (about 1.3 GB).
+- NVIDIA's own *RTX Video Super Resolution* isn't used: its SDK is only available to registered NVIDIA developers and can't be bundled.
+
+### Installing on Windows
+
+1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [Releases](../../releases) page, or from the latest run under the **Actions** tab (artifact *YouTube-Downloader-Windows-x64*).
+2. Run it. The app is not code-signed, so Windows SmartScreen will say *"Windows protected your PC"*. Click **More info → Run anyway**.
+3. Start **YouTube Downloader** from the Start menu.
+
+Command line: `"C:\Program Files\YouTube Downloader\youtube-downloader-cli.exe" --help`. To check the NVIDIA engine and encoders, run `--self-test`.
+
+To build it yourself on Windows (Python 3.11+ from python.org), run `python scripts\build_windows.py`. It needs Inno Setup 6 for the installer; without it, you get a zip instead.
+
+## Installing on macOS
 
 1. Download the `.dmg` for your Mac from the [Releases](../../releases) page, or from the latest run under the repository's **Actions** tab (artifact *YouTube-Downloader-macOS-…*):
    - `arm64`: Apple Silicon (M1, M2, M3, M4, …)
@@ -105,12 +145,14 @@ python3 -m pytest                                # tests (need ffmpeg)
 src/ytdownloader/
   formats.py     quality tiers and stream selection (pure, unit-tested)
   downloader.py  yt-dlp integration, MP3, progress reporting, HEVC conversion
-  upscale.py     AI upscaling pipeline (ffmpeg → Real-ESRGAN → ffmpeg)
+  upscale.py     AI upscaling: model choice, Real-ESRGAN (Vulkan/Metal) pipeline
+  onnx_engine.py AI upscaling on NVIDIA GPUs (ONNX Runtime, CUDA, float16)
   tools.py       finds the bundled ffmpeg / ffprobe / deno / realesrgan
   gui.py         Tk user interface
   cli.py         command-line interface and --self-test
-packaging/       PyInstaller spec and entry script
-scripts/         build_macos.sh, fetch_tools.sh, make_icon.py,
-                 convert_srvgg_to_ncnn.py (builds the Fast model), bench_upscale.py
+packaging/       PyInstaller specs (macOS, windows/), Inno Setup script, entry script
+scripts/         build_macos.sh, fetch_tools.sh, build_windows.py, make_icon.py,
+                 convert_srvgg_to_ncnn.py (Fast model for Real-ESRGAN/ncnn),
+                 convert_to_onnx.py (models for the NVIDIA engine), bench_upscale.py
 tests/           format-selection tests and offline end-to-end pipeline tests
 ```
