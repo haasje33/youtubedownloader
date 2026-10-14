@@ -41,7 +41,7 @@ APP="/Applications/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
 
 ## Building it yourself
 
-GitHub Actions builds the app on every push (`.github/workflows/build-macos.yml`). Pushing a tag like `v1.0.0` publishes a release with both `.dmg` files. The workflow also rebuilds once a week, so the app keeps getting the newest yt-dlp.
+GitHub Actions builds the app on every push (`.github/workflows/build-macos.yml`). Pushing a tag like `v0.1.0` publishes a release with both `.dmg` files. The workflow also rebuilds once a week, so the app keeps getting the newest yt-dlp.
 
 To build on a Mac you need Python 3.11+ with Tk (the python.org installer includes Tk):
 
