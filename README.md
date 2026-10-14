@@ -121,14 +121,14 @@ APP="/Applications/YouTube Downloader.app/Contents/MacOS/YouTube Downloader"
 
 ## Building it yourself
 
-`.github/workflows/build.yml` runs the tests on every push. The apps (Apple Silicon `.dmg` plus update `.zip`, and the Windows installer) are built when you push a version tag, or when you start the workflow by hand (Actions → Build apps → Run workflow, optionally with the upscaler benchmark).
+`.github/workflows/build.yml` runs the tests on every push. Every push to `main` also builds both apps (Apple Silicon `.dmg` plus update `.zip`, and the Windows installer).
 
 To release:
 1. Add a section for the version to `CHANGELOG.md`; it becomes the release notes.
 2. Set `__version__` in `src/ytdownloader/__init__.py`.
-3. Push a tag `vX.Y.Z`.
+3. Push to `main`.
 
-The workflow attaches the files and `SHA256SUMS.txt` to the release of that tag in this repository, where the in-app updater finds them. You can also create the release on GitHub first (Releases → Draft a new release → new tag, target `main`). The workflow then fills in the files and the notes from `CHANGELOG.md`.
+If that version has no release yet, the build creates the tag `vX.Y.Z` and the GitHub release, with the files, `SHA256SUMS.txt` and the notes. The in-app updater finds it there.
 
 To build on a Mac you need Python 3.11+ with Tk (the python.org installer includes Tk):
 
