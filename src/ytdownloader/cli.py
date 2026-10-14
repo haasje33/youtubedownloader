@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-update", action="store_true", help="check for a new app version")
     parser.add_argument("--update-ytdlp", action="store_true",
                         help="download the newest yt-dlp now (used from the next start)")
+    parser.add_argument("--install-nvidia-pack", nargs="+", type=Path, metavar="PART",
+                        help=argparse.SUPPRESS)  # used by the Windows installer
+    parser.add_argument("--download-nvidia-pack", action="store_true",
+                        help="download and install NVIDIA support (Windows)")
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging to stderr")
     return parser
 
@@ -97,6 +101,17 @@ def self_test() -> int:
         except ImportError:
             print("onnxruntime: MISSING")
             ok = False
+        from . import nvidia_pack
+
+        info = nvidia_pack.pack_info()
+        if info is None:
+            print("NVIDIA package: not used by this build")
+        else:
+            print(f"NVIDIA package {info['version']}: {nvidia_pack.pack_dir() or 'not installed'}")
+            print(f"    TensorRT: {'yes' if onnx_engine.tensorrt_available() else 'no'}")
+            if nvidia_pack.pack_dir() is not None:
+                for name, result in onnx_engine.provider_load_check().items():
+                    print(f"    {name} provider DLLs: {result}")
         # Informational: CI machines have no NVIDIA GPU.
         status = onnx_engine.cuda_status()
         print(f"NVIDIA engine: {'ready' if status.available else 'not available'} — {status.detail}")
@@ -132,6 +147,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         print(f"Update available: {release.version} ({release.asset_name})" if release else "Up to date.")
+        return 0
+    if args.install_nvidia_pack or args.download_nvidia_pack:
+        from . import nvidia_pack
+
+        try:
+            if args.install_nvidia_pack:
+                folder = nvidia_pack.install_parts(args.install_nvidia_pack)
+            else:
+                folder = nvidia_pack.install(lambda done, total: print(
+                    f"\r{done / max(total, 1) * 100:5.1f}%", end="", file=sys.stderr, flush=True))
+                print(file=sys.stderr)
+        except nvidia_pack.PackError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"NVIDIA support installed in {folder}")
         return 0
     if args.update_ytdlp:
         from . import ytdlp_update

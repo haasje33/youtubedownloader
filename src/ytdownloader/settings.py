@@ -43,6 +43,7 @@ class Settings:
     upscale_content: str = "realistic"
     last_update_check: float = 0.0
     skipped_version: str = ""
+    notifications: bool = True
 
     @classmethod
     def load(cls) -> "Settings":

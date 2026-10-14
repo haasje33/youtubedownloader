@@ -135,6 +135,80 @@ def base_params(cookies_from_browser: str | None = None) -> dict:
     return params
 
 
+@dataclass
+class PlaylistEntry:
+    id: str
+    url: str
+    title: str
+    duration: float | None = None
+
+
+@dataclass
+class PlaylistInfo:
+    url: str
+    title: str
+    uploader: str | None
+    entries: list[PlaylistEntry]
+
+
+_TAB_SUFFIXES = ("/videos", "/shorts", "/streams", "/playlists", "/featured", "/releases", "/podcasts")
+
+
+def _video_info(info: dict, url: str) -> VideoInfo:
+    fmts = info.get("formats") or [info]
+    tiers = formats.available_tiers(fmts)
+    if not tiers:
+        raise DownloadFailed("No video streams were found for this link.")
+    return VideoInfo(
+        url=info.get("webpage_url") or url,
+        id=info.get("id", ""),
+        title=info.get("title") or "video",
+        uploader=info.get("uploader") or info.get("channel"),
+        duration=info.get("duration"),
+        formats=fmts,
+        tiers=tiers,
+    )
+
+
+def _playlist_info(info: dict, url: str) -> PlaylistInfo:
+    entries = []
+    for entry in info.get("entries") or []:
+        if not entry:
+            continue
+        vid = entry.get("id") or ""
+        link = entry.get("url") or entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
+        if not link:
+            continue
+        entries.append(PlaylistEntry(id=vid, url=link, title=entry.get("title") or vid or link,
+                                     duration=entry.get("duration")))
+    if not entries:
+        raise DownloadFailed("This playlist or channel has no videos that can be downloaded.")
+    return PlaylistInfo(url=info.get("webpage_url") or url, title=info.get("title") or "Playlist",
+                        uploader=info.get("uploader") or info.get("channel"), entries=entries)
+
+
+def fetch(url: str, cookies_from_browser: str | None = None) -> VideoInfo | PlaylistInfo:
+    """Look up a link: a single video, or a playlist/channel (listed without details)."""
+    url = url.strip()
+    if not url:
+        raise DownloadFailed("Please paste a YouTube link first.")
+    params = base_params(cookies_from_browser) | {"extract_flat": "in_playlist"}
+    try:
+        with yt_dlp.YoutubeDL(params) as ydl:
+            info = ydl.extract_info(url, download=False, process=True)
+            entries = [e for e in info.get("entries") or [] if e]
+            # A channel's main page lists its tabs (Videos, Shorts, Live); use "Videos".
+            if entries and all(str(e.get("url", "")).rstrip("/").endswith(_TAB_SUFFIXES) for e in entries):
+                tab = next((e for e in entries if str(e["url"]).rstrip("/").endswith("/videos")), entries[0])
+                info = ydl.extract_info(tab["url"], download=False, process=True)
+                info.setdefault("title", tab.get("title"))
+    except yt_dlp.utils.DownloadError as exc:
+        raise DownloadFailed(friendly_error(exc)) from exc
+    if info.get("_type") == "playlist" or "entries" in info:
+        return _playlist_info(info, url)
+    return _video_info(info, url)
+
+
 def fetch_info(url: str, cookies_from_browser: str | None = None) -> VideoInfo:
     url = url.strip()
     if not url:
@@ -149,20 +223,13 @@ def fetch_info(url: str, cookies_from_browser: str | None = None) -> VideoInfo:
         raise DownloadFailed(
             "That link is a playlist. Open a single video and paste its link instead."
         )
+    return _video_info(info, url)
 
-    fmts = info.get("formats") or [info]
-    tiers = formats.available_tiers(fmts)
-    if not tiers:
-        raise DownloadFailed("No video streams were found for this link.")
-    return VideoInfo(
-        url=info.get("webpage_url") or url,
-        id=info.get("id", ""),
-        title=info.get("title") or "video",
-        uploader=info.get("uploader") or info.get("channel"),
-        duration=info.get("duration"),
-        formats=fmts,
-        tiers=tiers,
-    )
+
+def safe_folder_name(name: str) -> str:
+    """A playlist title usable as a folder name on Windows and macOS."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+    return cleaned[:120] or "Playlist"
 
 
 def unique_path(path: Path) -> Path:

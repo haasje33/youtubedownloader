@@ -112,19 +112,47 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ONNX upscale failed" }
           Get-ChildItem "$env:RUNNER_TEMP\up"
 
-      - name: Install silently and relaunch, as the in-app updater does
+      # CI has no NVIDIA GPU, so the NVIDIA package download is forced. A package
+      # built in this run isn't published yet; it is served from this machine.
+      - name: Install silently with the NVIDIA package, as the in-app updater does
         run: |
           $setup = Get-ChildItem dist\*Setup.exe | Select-Object -First 1
-          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS" -PassThru -Wait
+          $setupArgs = "/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NVIDIAPACK=force /LOG=`"$env:RUNNER_TEMP\setup.log`""
+          $server = $null
+          if (Test-Path dist\nvidia-pack\nvidia_pack.json) {
+            $server = Start-Process python -ArgumentList "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "dist\nvidia-pack" -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds 3
+            $setupArgs += " /NVIDIABASEURL=http://127.0.0.1:8765/"
+          }
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList $setupArgs -PassThru -Wait
+          if ($server) { Stop-Process -Id $server.Id -Force }
+          Get-Content "$env:RUNNER_TEMP\setup.log" -Tail 40
           if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
-          & "${env:ProgramFiles}\YouTube Downloader\youtube-downloader-cli.exe" --self-test
+          $cli = "${env:ProgramFiles}\YouTube Downloader\youtube-downloader-cli.exe"
+          $out = & $cli --self-test | Out-String
+          Write-Output $out
           if ($LASTEXITCODE -ne 0) { throw "Installed app failed its self-test" }
+          # Loading the providers needs every CUDA/cuDNN DLL from the package, but no GPU.
+          if ($out -notmatch "cuda provider DLLs: ok") { throw "The CUDA provider can't load the NVIDIA package" }
+          $version = (Get-Content "dist\YouTube Downloader\_internal\nvidia_pack.json" | ConvertFrom-Json).version
+          if (-not (Test-Path "$env:ProgramData\YouTube Downloader\nvidia\$version\.complete")) {
+            throw "The installer did not install NVIDIA package $version"
+          }
+          Get-ChildItem "$env:ProgramData\YouTube Downloader\nvidia\$version" | Format-Table Name, Length
 
       - uses: actions/upload-artifact@v4
         with:
           name: YouTube-Downloader-Windows-x64
           path: dist/*Setup.exe
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('dist/nvidia-pack/nvidia_pack.json') != ''
+        with:
+          name: NVIDIA-pack
+          path: dist/nvidia-pack/*
           compression-level: 0
           retention-days: 14
 
@@ -160,8 +188,32 @@ jobs:
       - uses: actions/download-artifact@v4
         if: steps.version.outputs.release == 'true'
         with:
+          pattern: YouTube-Downloader-*
           path: artifacts
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        if: steps.version.outputs.release == 'true'
+        with:
+          pattern: NVIDIA-pack
+          path: nvidia-pack
+          merge-multiple: true
+
+      # The NVIDIA package has its own release (nvidia-<version>), made only when it changed.
+      - name: Publish the NVIDIA package
+        if: steps.version.outputs.release == 'true' && hashFiles('nvidia-pack/nvidia_pack.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pack=$(jq -r .version nvidia-pack/nvidia_pack.json)
+          if gh release view "nvidia-$pack" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "nvidia-$pack is already published."
+          else
+            ls -la nvidia-pack
+            gh release create "nvidia-$pack" nvidia-pack/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --latest=false --title "NVIDIA support package $pack" \
+              --notes "CUDA, cuDNN and TensorRT for YouTube Downloader on Windows. Downloaded by the installer and the app; you don't need to download this yourself."
+          fi
 
       - name: Checksums and release notes
         if: steps.version.outputs.release == 'true'

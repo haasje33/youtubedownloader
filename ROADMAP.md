@@ -14,14 +14,13 @@ Fixes for problems found while testing the Windows app (v0.4.0).
 - Release pipeline: Apple Silicon and Windows only, releases with checksums on this repository's releases page (#1)
 - In-app updater: check, download, verify, install and restart, on Windows with the normal administrator prompt (#2)
 - Automatic yt-dlp updates (#3)
-- Released as **v0.5.1**, the last manual install. A small v0.5.2 confirms the updater works on both platforms.
+- Released as **v0.5.1**, the last manual install. v0.6.0 is the first update installed by the updater.
 
-## v0.6.0: Queue, playlists, notifications
+## v0.6.0: Queue, playlists, notifications, smarter upscaling
+(The planned v0.6.0 and v0.7.0, combined.)
 - Download queue (#4)
 - Playlists and channels (#5)
 - Notifications when items and the queue finish (#6)
-
-## v0.7.0: Smarter upscaling
 - Before/after preview with time estimates (#7)
 - TensorRT engine for NVIDIA, with the same quality as CUDA (#8)
 - Small Windows installer; the installer downloads the NVIDIA package (#9)

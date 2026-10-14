@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0
+
+- **Download queue.** Add as many videos, MP3s and upscales as you like; they run one
+  after another. Reorder, pause, retry or remove items. The queue is kept when you quit
+  and continues where it left off.
+- **Playlists and channels.** Paste a playlist or channel link, tick the videos you want,
+  choose a quality, and they are added to the queue, optionally in a folder named after
+  the playlist.
+- **Notifications** when an item or the whole queue finishes (can be switched off).
+- **Upscale preview.** "Preview…" upscales one frame of the video with each AI model, shows
+  it next to a plain enlargement (zoom up to 300%), and measures how long the whole
+  video would take on your computer with each model.
+- **Windows: TensorRT** for NVIDIA cards. The first time a model is used, the app builds
+  a TensorRT engine for your card and compares its output with the CUDA engine; it is
+  only used if the result is identical (no visible difference). Otherwise CUDA stays in use.
+- **Windows: a much smaller installer.** NVIDIA support (CUDA, cuDNN, TensorRT) is now a
+  separate download that the installer fetches only on PCs with an NVIDIA card. You can
+  also download it later from the app ("Download NVIDIA support…").
+
 ## 0.5.1
 
 - **In-app updates.** The app checks for new versions at startup (once a day) and under

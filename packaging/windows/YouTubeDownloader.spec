@@ -19,6 +19,8 @@ datas += [
     (os.path.join(VENDOR, "onnx-models"), "onnx-models"),
     (ICON, "."),
 ]
+if os.path.exists(os.path.join(VENDOR, "nvidia_pack.json")):  # written by scripts/build_windows.py
+    datas.append((os.path.join(VENDOR, "nvidia_pack.json"), "."))
 
 a = Analysis(
     [os.path.join(ROOT, "packaging", "app_main.py")],

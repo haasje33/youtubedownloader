@@ -2,13 +2,15 @@
 
 A small app for Macs with Apple Silicon and for Windows PCs that downloads YouTube videos as **MP4** in any quality YouTube offers, from 144p up to **4K (2160p)**, or as **MP3** audio. It can also **upscale low-resolution videos with AI**.
 
-- Paste a link, click **Get Video Info**, pick a quality, click **Download**.
+- Paste a link, click **Get Info**, pick a quality, click **Add to Queue**.
+- **Queue:** downloads, MP3s and upscales run one after another. You can reorder, pause, retry and remove items, and the queue is kept when you quit. A notification tells you when items finish (switch it off with *Notify me when items finish*).
+- **Playlists and channels:** paste their link and tick the videos you want. They are added to the queue with one quality setting, optionally into a folder named after the playlist.
 - The highest available quality is selected by default. Only the qualities that exist for that video are listed, with the estimated download size.
 - **Audio only (MP3)**, the last entry in the quality list, saves a high-quality MP3 (VBR ~245 kbps) with the title, channel and cover art.
 - Two video format options:
   - **Most compatible (H.264 / HEVC)**, the default. The file plays in QuickTime, Photos, iMovie and on iPhone/iPad. YouTube only offers H.264 up to 1080p, so for 1440p and 4K the app downloads the best stream and converts it to HEVC (H.265). The conversion uses the Mac's hardware video encoder.
   - **Original stream (AV1 / VP9)**. No conversion, so it's the fastest and loses no quality. QuickTime can't play every one of these files, but VLC and IINA can.
-- Shows progress, speed and time left. You can cancel a download, and the files are saved to `~/Downloads` by default.
+- Shows progress, speed and time left. You can cancel the running item, and the files are saved to `~/Downloads` by default.
 - **AI upscale** (to 1080p, 1440p or 4K) uses [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) on the Mac's own graphics chip, through Metal. It adds real detail instead of just enlarging the picture.
   - Three models:
     - **Real-life · best quality** (`realesrgan-x4plus`) gives the most detail and is the slowest.
@@ -23,6 +25,7 @@ A small app for Macs with Apple Silicon and for Windows PCs that downloads YouTu
     | Animation / cartoons | ~11.7 | ~8 minutes |
 
     A fanless MacBook Air can be slower on long jobs, once it heats up and throttles.
+  - **Preview…** upscales one frame with each model and shows it next to a plain enlargement, so you can see the difference before committing hours. It also measures each model's speed on your computer and estimates the time for the whole video.
   - It works on downloads that are below the chosen resolution, and on videos already on your Mac, through **Upscale a Video File…**.
   - It is slow: every frame goes through the AI model. With the best-quality model, a few minutes of video can take an hour or more.
   - The app shows frames per second and time left from the first frame on, and keeps the Mac awake meanwhile.
@@ -48,7 +51,8 @@ The Windows app has the same features, with Windows-specific video handling and 
 With an **NVIDIA GeForce RTX** card, the app upscales with ONNX Runtime on **CUDA + cuDNN**.
 - The Real-ESRGAN models run in float16 on the tensor cores.
 - Frames go straight from the decoder to the GPU and on to the NVENC encoder, without temporary files.
-- The upscale hint in the app shows which engine is in use, for example *"NVIDIA GeForce RTX 4070 Ti SUPER (CUDA, tensor cores)"*.
+- The upscale hint in the app shows which engine is in use, for example *"NVIDIA GeForce RTX 4070 Ti SUPER (TensorRT + CUDA, tensor cores)"*.
+- **TensorRT:** the first time a model is used, the app builds a TensorRT engine for your card (a few minutes, once; it is cached). It compares the TensorRT output with the CUDA output on a test frame and uses TensorRT only if they are identical (PSNR ≥ 50 dB, no visible difference). Otherwise it stays on CUDA. The verdict is remembered per model, card and ONNX Runtime version, in `%APPDATA%\YouTube Downloader\tensorrt.json`.
 
 Windows-specific models (ONNX, converted from the official Real-ESRGAN checkpoints by `scripts/convert_to_onnx.py`):
 
@@ -62,13 +66,13 @@ Windows-specific models (ONNX, converted from the official Real-ESRGAN checkpoin
 Requirements and fallbacks:
 - The NVIDIA engine needs an RTX 20-series or newer card and **NVIDIA driver 580 or newer** (CUDA 13).
 - On other graphics cards (AMD, Intel), or when CUDA is unavailable, the app uses Real-ESRGAN on Vulkan, like the Mac version.
-- The CUDA and cuDNN libraries make the Windows download large (about 1.3 GB).
+- **NVIDIA support** (CUDA, cuDNN and TensorRT, well over 1 GB) is a separate download, so the installer itself stays small. The installer offers it when it finds an NVIDIA card. You can also download it later with **Download NVIDIA support…** in the app, or with `youtube-downloader-cli.exe --download-nvidia-pack`. It is stored in `%ProgramData%\YouTube Downloader\nvidia` and only downloaded again when it changes.
 - NVIDIA's own *RTX Video Super Resolution* isn't used: its SDK is only available to registered NVIDIA developers and can't be bundled.
 
 ### Installing on Windows
 
 1. Download `YouTube-Downloader-<version>-Windows-x64-Setup.exe` from the [releases page](https://github.com/haasje33/youtubedownloader/releases).
-2. Run it. The app is not code-signed, so Windows SmartScreen will say *"Windows protected your PC"*. Click **More info → Run anyway**.
+2. Run it. With an NVIDIA card, leave *Download NVIDIA support* ticked. The app is not code-signed, so Windows SmartScreen will say *"Windows protected your PC"*. Click **More info → Run anyway**.
 3. Start **YouTube Downloader** from the Start menu.
 
 Command line: `"C:\Program Files\YouTube Downloader\youtube-downloader-cli.exe" --help`. To check the NVIDIA engine and encoders, run `--self-test`.
@@ -130,6 +134,8 @@ To release:
 
 If that version has no release yet, the build creates the tag `vX.Y.Z` and the GitHub release, with the files, `SHA256SUMS.txt` and the notes. The in-app updater finds it there.
 
+The Windows NVIDIA package has its own pre-release, `nvidia-<version>`. Its version is a hash of the DLLs, so it is only built and published again when CUDA, cuDNN or TensorRT change.
+
 To build on a Mac you need Python 3.11+ with Tk (the python.org installer includes Tk):
 
 ```sh
@@ -164,9 +170,13 @@ src/ytdownloader/
   formats.py     quality tiers and stream selection (pure, unit-tested)
   downloader.py  yt-dlp integration, MP3, progress reporting, HEVC conversion
   upscale.py     AI upscaling: model choice, Real-ESRGAN (Vulkan/Metal) pipeline
-  onnx_engine.py AI upscaling on NVIDIA GPUs (ONNX Runtime, CUDA, float16)
+  onnx_engine.py AI upscaling on NVIDIA GPUs (ONNX Runtime, TensorRT/CUDA, float16)
   tools.py       finds the bundled ffmpeg / ffprobe / deno / realesrgan
-  gui.py         Tk user interface
+  gui.py         Tk user interface (main window, queue, playlist picker, preview)
+  jobs.py        the download queue: jobs, persistence, worker thread
+  preview.py     before/after upscale preview and speed measurement
+  notify.py      notifications (Notification Center / Windows toasts)
+  nvidia_pack.py the separately downloaded NVIDIA package (Windows)
   cli.py         command-line interface and --self-test
   updater.py     in-app updates from the releases repository
   ytdlp_update.py  keeps yt-dlp current between app updates

@@ -12,6 +12,7 @@ frames, so all of the arithmetic runs on the GPU.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import tools
+from . import nvidia_pack, tools
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ PRE_PAD = 10            # reflection padding around each frame, as in Real-ESRGA
 TILE = 512              # tile size (input pixels) for large frames
 TILE_PAD = 32           # overlap around each tile; RRDBNet sees far, so be generous
 TILE_THRESHOLD = 960 * 540
+# Largest input the models get (whole frames up to TILE_THRESHOLD, or tiles), incl. padding.
+# TensorRT builds one engine per model for shapes up to this size.
+MAX_INPUT = 1008
+PSNR_GATE = 50.0        # TensorRT is used only if it matches the CUDA engine this closely
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ class EngineStatus:
     available: bool
     detail: str
     gpu: str | None = None
+    needs_pack: bool = False      # NVIDIA GPU present, but the NVIDIA package isn't installed
 
 
 def models_dir() -> Path | None:
@@ -61,12 +67,18 @@ def models_dir() -> Path | None:
 
 
 def _prepare_dll_search() -> None:
-    """Let Windows find the bundled CUDA/cuDNN DLLs (they sit next to ONNX Runtime)."""
+    """Let Windows find ONNX Runtime's providers and the CUDA/cuDNN/TensorRT DLLs
+    from the NVIDIA package."""
     if not tools.IS_WINDOWS:
         return
     base = getattr(sys, "_MEIPASS", None)
     dirs = [Path(base) / "onnxruntime" / "capi"] if base else []
+    pack = nvidia_pack.pack_dir()
+    if pack is not None:
+        dirs.insert(0, pack)
     for directory in dirs:
+        if str(directory) in os.environ.get("PATH", "").split(os.pathsep):
+            continue
         if directory.is_dir():
             os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
             try:
@@ -101,7 +113,66 @@ def _cuda_provider_options(nhwc: bool) -> dict:
     return options
 
 
-def create_session(model_path: Path, use_cuda: bool):
+def tensorrt_cache_dir() -> Path:
+    from .settings import log_dir
+
+    return log_dir().parent / "tensorrt-cache"
+
+
+def _tensorrt_provider_options() -> dict:
+    cache = tensorrt_cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    return {
+        "device_id": "0",
+        "trt_fp16_enable": "True",               # same float16 precision as the CUDA engine
+        "trt_engine_cache_enable": "True",       # build once per model, then load in seconds
+        "trt_engine_cache_path": str(cache),
+        "trt_timing_cache_enable": "True",
+        "trt_timing_cache_path": str(cache),
+        "trt_builder_optimization_level": "3",
+        "trt_profile_min_shapes": "frame:1x16x16x3",
+        "trt_profile_opt_shapes": "frame:1x576x980x3",
+        "trt_profile_max_shapes": f"frame:1x{MAX_INPUT}x{MAX_INPUT}x3",
+    }
+
+
+def tensorrt_available() -> bool:
+    if not tools.IS_WINDOWS or os.environ.get("YTD_NO_TENSORRT"):
+        return False
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return False
+    if "TensorrtExecutionProvider" not in ort.get_available_providers():
+        return False
+    pack = nvidia_pack.pack_dir()
+    return pack is not None and (pack / "nvinfer_10.dll").exists()
+
+
+def provider_load_check() -> dict[str, str]:
+    """Windows: load ONNX Runtime's CUDA and TensorRT provider DLLs, which needs all
+    their CUDA/cuDNN/TensorRT dependencies but no GPU. Used by --self-test."""
+    import ctypes
+
+    import onnxruntime as ort
+
+    _prepare_dll_search()
+    capi = Path(ort.__file__).resolve().parent / "capi"
+    results = {}
+    for name in ("cuda", "tensorrt"):
+        dll = capi / f"onnxruntime_providers_{name}.dll"
+        if not dll.exists():
+            results[name] = "not in this build"
+            continue
+        try:
+            ctypes.WinDLL(str(dll))
+            results[name] = "ok"
+        except OSError as exc:
+            results[name] = f"failed ({exc})"
+    return results
+
+
+def create_session(model_path: Path, use_cuda: bool, tensorrt: bool = False):
     import onnxruntime as ort
 
     options = ort.SessionOptions()
@@ -109,6 +180,14 @@ def create_session(model_path: Path, use_cuda: bool):
     options.log_severity_level = 3
     if not use_cuda:
         return ort.InferenceSession(str(model_path), options, providers=["CPUExecutionProvider"])
+    if tensorrt:
+        session = ort.InferenceSession(
+            str(model_path), options,
+            providers=[("TensorrtExecutionProvider", _tensorrt_provider_options()),
+                       ("CUDAExecutionProvider", _cuda_provider_options(True)), "CPUExecutionProvider"])
+        if session.get_providers()[0] != "TensorrtExecutionProvider":
+            raise RuntimeError("TensorRT could not be initialised")
+        return session
     last_error: Exception | None = None
     for nhwc in (True, False):
         try:
@@ -147,20 +226,101 @@ def cuda_status() -> EngineStatus:
     gpu = gpu_name()
     if gpu is None and tools.IS_WINDOWS:
         return EngineStatus(False, "No NVIDIA GPU (or driver) was found.")
+    if nvidia_pack.needed():
+        return EngineStatus(False, "NVIDIA support isn't installed yet.", gpu, needs_pack=True)
+    _prepare_dll_search()
     smallest = min(directory.glob("*.onnx"), key=lambda p: p.stat().st_size)
     try:
         create_session(smallest, use_cuda=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("CUDA engine unavailable: %s", exc)
         return EngineStatus(False, f"CUDA is not usable: {exc}", gpu)
-    return EngineStatus(True, f"{gpu or 'NVIDIA GPU'} (CUDA, tensor cores)", gpu)
+    engine = "TensorRT + CUDA" if tensorrt_available() else "CUDA"
+    return EngineStatus(True, f"{gpu or 'NVIDIA GPU'} ({engine}, tensor cores)", gpu)
+
+
+def _gate_file() -> Path:
+    from .settings import support_dir
+
+    return support_dir() / "tensorrt.json"
+
+
+def _test_frame():
+    """Deterministic frame with gradients, edges and texture for comparing engines."""
+    import numpy as np
+
+    y, x = np.mgrid[0:144, 0:256].astype(np.float64)
+    rng = np.random.default_rng(1234)
+    frame = np.stack([x, y * 255 / 143, (x + y) % 64 * 4], axis=-1)
+    frame += rng.normal(0, 12, frame.shape)
+    checker = ((x // 8 + y // 8) % 2).astype(bool)
+    frame[40:100, 60:200] = np.where(checker[40:100, 60:200, None], 230, 25)
+    return np.clip(frame, 0, 255).astype(np.uint8)
+
+
+def psnr(a, b) -> float:
+    import numpy as np
+
+    mse = float(np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2))
+    return 99.0 if mse == 0 else float(10 * np.log10(255 ** 2 / mse))
+
+
+def _save_verdicts(verdicts: dict) -> None:
+    try:
+        _gate_file().parent.mkdir(parents=True, exist_ok=True)
+        _gate_file().write_text(json.dumps(verdicts, indent=1))
+    except OSError:
+        pass
+
+
+def tensorrt_session_if_identical(model_path: Path, model: str, on_status=None):
+    """A TensorRT session for `model` if (and only if) its output matches the CUDA
+    engine (PSNR >= PSNR_GATE). The verdict is remembered per model, GPU and ONNX
+    Runtime version; the TensorRT engine itself is cached on disk."""
+    import onnxruntime as ort
+
+    key = f"{model}|{ort.__version__}|{gpu_name()}"
+    try:
+        verdicts = json.loads(_gate_file().read_text())
+    except (OSError, ValueError):
+        verdicts = {}
+    if verdicts.get(key, {}).get("ok") is False:
+        return None
+    if on_status and key not in verdicts:
+        on_status("Optimising the AI model for your graphics card with TensorRT "
+                  "(only the first time for this model; this takes a few minutes)…")
+    try:
+        trt = create_session(model_path, True, tensorrt=True)
+        if key not in verdicts:
+            frame = _test_frame()[None]
+            cuda = create_session(model_path, True)
+            same = psnr(trt.run(["image"], {"frame": frame})[0], cuda.run(["image"], {"frame": frame})[0])
+            verdicts[key] = {"ok": same >= PSNR_GATE, "psnr": round(same, 1)}
+            _save_verdicts(verdicts)
+            log.info("TensorRT vs CUDA for %s: %.1f dB -> %s", model, same,
+                     "using TensorRT" if same >= PSNR_GATE else "staying on CUDA")
+        return trt if verdicts[key]["ok"] else None
+    except Exception as exc:  # noqa: BLE001 - TensorRT is optional; CUDA always works
+        log.warning("TensorRT unavailable for %s: %s", model, exc)
+        verdicts[key] = {"ok": False, "error": str(exc)[:300]}
+        _save_verdicts(verdicts)
+        return None
 
 
 class OnnxUpscaler:
     """Upscales single RGB frames (H, W, 3 uint8) with an ONNX Real-ESRGAN model."""
 
-    def __init__(self, model_path: Path, scale: int, use_cuda: bool = True):
-        self.session = create_session(model_path, use_cuda)
+    def __init__(self, model_path: Path, scale: int, use_cuda: bool = True,
+                 allow_tensorrt: bool = True, on_status=None):
+        self.session = None
+        self.engine = "CPU"
+        if use_cuda and allow_tensorrt and tensorrt_available():
+            self.session = tensorrt_session_if_identical(model_path, model_path.stem, on_status)
+            if self.session is not None:
+                self.engine = "TensorRT"
+        if self.session is None:
+            self.session = create_session(model_path, use_cuda)
+            self.engine = "CUDA" if use_cuda else "CPU"
         self.scale = scale
         self.multiple = 2 if scale == 2 else 1  # x2plus pixel-unshuffles, so sizes must be even
 
@@ -179,7 +339,7 @@ class OnnxUpscaler:
 
         h, w = frame.shape[:2]
         s = self.scale
-        if h * w <= TILE_THRESHOLD:
+        if h * w <= TILE_THRESHOLD and max(h, w) + 2 * PRE_PAD + 1 <= MAX_INPUT:
             p = PRE_PAD
             padded = np.pad(frame, ((p, p), (p, p), (0, 0)), mode="reflect")
             return self._infer(padded)[p * s:(p + h) * s, p * s:(p + w) * s]
@@ -215,12 +375,13 @@ def upscale_video(source: Path, destination: Path, info, plan, video_encoder_arg
 
     started = time.monotonic()
     on_progress(None, "AI upscaling — loading the AI model on the GPU…")
-    upscaler = OnnxUpscaler(model_file, plan.scale, use_cuda)
+    upscaler = OnnxUpscaler(model_file, plan.scale, use_cuda,
+                            on_status=lambda text: on_progress(None, "AI upscaling — " + text))
     w, h, s = info.width, info.height, plan.scale
     frame_size = w * h * 3
     total = info.estimated_frames
     log.info("Upscaling %s (%dx%d @ %s) with %s x%d (%s) to %dx%d", source.name, w, h, info.frame_rate,
-             plan.model, s, "CUDA" if use_cuda else "CPU", plan.out_width, plan.out_height)
+             plan.model, s, upscaler.engine, plan.out_width, plan.out_height)
 
     import tempfile
     partial = destination.with_name(destination.name + ".part.mp4")
