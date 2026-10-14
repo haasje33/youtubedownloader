@@ -20,10 +20,14 @@ Everything it needs is inside the app: [yt-dlp](https://github.com/yt-dlp/yt-dlp
    - `arm64`: Apple Silicon (M1, M2, M3, M4, …)
    - `x86_64`: Intel Macs
 2. Open the `.dmg` and drag **YouTube Downloader** into **Applications**.
-3. The app is not notarized by Apple, so the first time you open it:
-   - **Right-click → Open** in Finder and confirm, or
-   - open **System Settings → Privacy & Security** and click **Open Anyway**, or
-   - run `xattr -dr com.apple.quarantine "/Applications/YouTube Downloader.app"` in Terminal.
+3. The app is not notarized by Apple, so the first time you open it macOS says it "could not verify that YouTube Downloader is free of malware". To allow it:
+   - Try to open the app once and click **Done** in the warning.
+   - Open **System Settings → Privacy & Security**, scroll down to **Security**, click **Open Anyway** next to the YouTube Downloader message, and enter your password.
+   - Open the app again and click **Open Anyway** in the dialog. macOS remembers this choice.
+
+   Or run this once in Terminal: `xattr -dr com.apple.quarantine "/Applications/YouTube Downloader.app"`
+
+   On macOS 15 (Sequoia) and later, right-click → Open no longer skips this warning.
 
 It needs macOS 11 (Big Sur) or later.
 
