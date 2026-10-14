@@ -77,7 +77,7 @@ To build it yourself on Windows (Python 3.11+ from python.org), run `python scri
 
 ## Installing on macOS
 
-1. Download `YouTube-Downloader-<version>-macOS-arm64.dmg` from the [releases page](https://github.com/haasje33/youtubedownloader/releases). It runs on Macs with Apple Silicon (M1 and newer); Intel Macs are no longer supported from v0.5.0.
+1. Download `YouTube-Downloader-<version>-macOS-arm64.dmg` from the [releases page](https://github.com/haasje33/youtubedownloader/releases). It runs on Macs with Apple Silicon (M1 and newer); Intel Macs are no longer supported from v0.5.1.
 2. Open the `.dmg` and drag **YouTube Downloader** into **Applications**.
 3. The app is not notarized by Apple, so the first time you open it macOS says it "could not verify that YouTube Downloader is free of malware". To allow it:
    - Try to open the app once and click **Done** in the warning.

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0
+## 0.5.1
 
 - **In-app updates.** The app checks for new versions at startup (once a day) and under
   "Check for Updates…". It shows what's new, then downloads, verifies and installs the

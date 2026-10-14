@@ -1,6 +1,6 @@
 # Roadmap: v0.5.0 → v1.0.0
 
-Platforms from v0.5.0 on: **macOS on Apple Silicon** and **Windows (x64)**. The Intel Mac build is dropped.
+Platforms from v0.5.1 on: **macOS on Apple Silicon** and **Windows (x64)**. The Intel Mac build is dropped.
 Releases are published on this repository's
 [releases page](https://github.com/haasje33/youtubedownloader/releases),
 which is where the in-app updater downloads them from.
@@ -14,7 +14,7 @@ Fixes for problems found while testing the Windows app (v0.4.0).
 - Release pipeline: Apple Silicon and Windows only, releases with checksums on this repository's releases page (#1)
 - In-app updater: check, download, verify, install and restart, on Windows with the normal administrator prompt (#2)
 - Automatic yt-dlp updates (#3)
-- v0.5.0 is the last manual install. A small v0.5.1 confirms the updater works on both platforms.
+- Released as **v0.5.1**, the last manual install. A small v0.5.2 confirms the updater works on both platforms.
 
 ## v0.6.0: Queue, playlists, notifications
 - Download queue (#4)
